@@ -5,7 +5,9 @@ import { useActionState, useState } from "react";
 import type { ActionState } from "../actions";
 import { FormStatus } from "./form-status";
 
-type Row = { key: number; sizeLabel: string; stockQty: string; variantSku: string };
+// loadedSize/loadedStock: the size as it was when the page loaded ("" for new rows). The server applies the
+// difference to the current stock, so an order confirmed or cancelled meanwhile isn't overwritten.
+type Row = { key: number; sizeLabel: string; stockQty: string; variantSku: string; loadedSize: string; loadedStock: string };
 
 export function VariantsEditor({
   action,
@@ -21,11 +23,13 @@ export function VariantsEditor({
       sizeLabel: variant.sizeLabel,
       stockQty: String(variant.stockQty),
       variantSku: variant.variantSku ?? "",
+      loadedSize: variant.sizeLabel,
+      loadedStock: String(variant.stockQty),
     }));
-    return initial.length ? initial : [{ key: 0, sizeLabel: "", stockQty: "0", variantSku: "" }];
+    return initial.length ? initial : [{ key: 0, sizeLabel: "", stockQty: "0", variantSku: "", loadedSize: "", loadedStock: "" }];
   });
 
-  const update = (key: number, field: keyof Omit<Row, "key">, value: string) =>
+  const update = (key: number, field: "sizeLabel" | "stockQty" | "variantSku", value: string) =>
     setRows((current) => current.map((row) => (row.key === key ? { ...row, [field]: value } : row)));
 
   return (
@@ -42,6 +46,8 @@ export function VariantsEditor({
             <input name="sizeLabel" aria-label="Size" value={row.sizeLabel} onChange={(event) => update(row.key, "sizeLabel", event.target.value)} placeholder="M" maxLength={30} />
             <input name="stockQty" aria-label="Stock quantity" value={row.stockQty} onChange={(event) => update(row.key, "stockQty", event.target.value)} inputMode="numeric" pattern="[0-9]*" />
             <input name="variantSku" aria-label="Variant SKU" value={row.variantSku} onChange={(event) => update(row.key, "variantSku", event.target.value)} maxLength={64} />
+            <input type="hidden" name="loadedSize" value={row.loadedSize} />
+            <input type="hidden" name="loadedStock" value={row.loadedStock} />
             <button type="button" className="icon-button" aria-label={`Remove size ${row.sizeLabel || "row"}`} onClick={() => setRows((current) => current.filter((item) => item.key !== row.key))}>
               <X size={16} />
             </button>
@@ -52,7 +58,9 @@ export function VariantsEditor({
         <button
           type="button"
           className="secondary"
-          onClick={() => setRows((current) => [...current, { key: Math.max(-1, ...current.map((row) => row.key)) + 1, sizeLabel: "", stockQty: "0", variantSku: "" }])}
+          onClick={() =>
+            setRows((current) => [...current, { key: Math.max(-1, ...current.map((row) => row.key)) + 1, sizeLabel: "", stockQty: "0", variantSku: "", loadedSize: "", loadedStock: "" }])
+          }
         >
           <Plus size={16} /> Add size
         </button>

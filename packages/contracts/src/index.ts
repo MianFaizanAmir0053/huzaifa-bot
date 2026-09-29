@@ -33,6 +33,8 @@ export const InboundMessageSchema = z
     messageId: z.string().min(1).max(180),
     chatId: z.string().min(3).max(180),
     displayName: z.string().max(180).optional(),
+    // Real number (digits) when WhatsApp exposes it; chatId can be a privacy "@lid" id.
+    phoneNumber: z.string().regex(/^[0-9]{6,15}$/).optional(),
     occurredAt: z.string().datetime({ offset: true }),
     type: z.enum(["text", "image"]),
     text: z.string().max(4_000).optional(),
@@ -59,6 +61,8 @@ export const OutboundActionSchema = z.discriminatedUnion("type", [
     type: z.literal("image"),
     objectPath: z.string().min(1).max(512),
     caption: z.string().max(1_000).optional(),
+    // Public HTTPS URL of a catalog photo the gateway downloads and sends. Only product-images URLs are accepted.
+    url: z.url().refine((url) => url.startsWith("https://"), "Media URL must use HTTPS").optional(),
   }),
 ]);
 export type OutboundAction = z.infer<typeof OutboundActionSchema>;
@@ -66,9 +70,29 @@ export type OutboundAction = z.infer<typeof OutboundActionSchema>;
 export const BrainResponseSchema = z.object({
   eventId: z.string().min(1),
   duplicate: z.boolean().default(false),
-  actions: z.array(OutboundActionSchema).max(4),
+  // Up to 3 short texts + 3 product photos + 1 support alert, with headroom.
+  actions: z.array(OutboundActionSchema).max(8),
 });
 export type BrainResponse = z.infer<typeof BrainResponseSchema>;
+
+// A message the shop owner typed on the bot's own WhatsApp (phone or linked device).
+// The brain records it in the chat history and pauses the bot for that chat.
+export const OwnerMessageSchema = z.object({
+  messageId: z.string().min(1).max(180),
+  chatId: z.string().min(3).max(180),
+  // Other ids WhatsApp may use for the same customer (privacy "@lid" vs phone "@c.us").
+  alternateChatIds: z.array(z.string().min(3).max(180)).max(3).default([]),
+  occurredAt: z.string().datetime({ offset: true }),
+  type: z.enum(["text", "image"]),
+  text: z.string().max(4_000).optional(),
+});
+export type OwnerMessage = z.infer<typeof OwnerMessageSchema>;
+
+export const OwnerMessageResultSchema = z.object({
+  recorded: z.boolean(),
+  paused: z.boolean(),
+});
+export type OwnerMessageResult = z.infer<typeof OwnerMessageResultSchema>;
 
 export const DeliveryAcknowledgementSchema = z.object({
   actionId: z.uuid(),

@@ -1,16 +1,28 @@
+import { after } from "next/server";
 import { InboundMessageSchema } from "@huzaifa/contracts";
-import { GeminiMessageClassifier } from "@/agent/classifier";
 import { processInboundMessage } from "@/agent/orchestrator";
-import { createSupabaseBrainRepository } from "@/catalog/repository";
 import { createInboundImageLoader } from "@/catalog/inbound-media";
-import { getServerEnvironment, getVisionEnvironment } from "@/config/env";
-import { createSupabaseServiceClient } from "@/lib/supabase/service";
+import { createSupabaseBrainRepository } from "@/catalog/repository";
+import { getAppBaseUrl, getServerEnvironment, getVisionEnvironment } from "@/config/env";
+import { createSupabaseServiceClient, productImagePublicUrl } from "@/lib/supabase/service";
 import { verifyGatewaySignature } from "@/security/gateway-signature";
+import { readLimitedBody } from "@/security/request-body";
+import { sendGatewayMessage } from "@/gateway/admin-client";
+import { DEFAULT_SHOP_SETTINGS } from "@/shop/settings";
+import { loadShopSettings } from "@/shop/settings-store";
 
 export const runtime = "nodejs";
+// The agent may make a few model calls; the gateway waits up to 45s.
+export const maxDuration = 60;
+
+// Replies still "sending" after this long were never picked up by the gateway.
+const STALE_DELIVERY_MS = 15 * 60_000;
+let lastStaleSweep = 0;
 
 export async function POST(request: Request): Promise<Response> {
-  const body = await request.text();
+  const read = await readLimitedBody(request);
+  if (!read.ok) return read.response;
+  const body = read.body;
   let environment;
   try {
     environment = getServerEnvironment();
@@ -47,19 +59,45 @@ export async function POST(request: Request): Promise<Response> {
       environment.SUPABASE_SERVICE_ROLE_KEY,
     );
     const vision = getVisionEnvironment();
-    // Without a Gemini key the orchestrator falls back to keyword rules (greeting, handoff, size, raw-text search).
-    const classifier = vision.GEMINI_API_KEY
-      ? new GeminiMessageClassifier({
-          apiKey: vision.GEMINI_API_KEY,
-          model: vision.GEMINI_MODEL,
-          loadImage: createInboundImageLoader(createSupabaseServiceClient()),
-        })
-      : undefined;
+    const service = createSupabaseServiceClient();
+    // Settings unreadable (and nothing cached): answer with defaults, but never take orders the owner may have
+    // switched off.
+    const shop = await loadShopSettings(service).catch(() => ({ ...DEFAULT_SHOP_SETTINGS, ordersEnabled: false }));
     const result = await processInboundMessage(parsedMessage.data, {
       repository,
       supportChatId: environment.SUPPORT_WA_ID,
-      classifier,
+      shop,
+      publicUrl: productImagePublicUrl,
+      loadImage: createInboundImageLoader(service),
+      // Without a Gemini key the bot answers with rules (greetings, search, closest items, handoff).
+      agent: vision.geminiKeys.length
+        ? {
+            apiKey: vision.geminiKeys,
+            // The stronger model writes replies. When it is overloaded (503s are common at peak), the other full
+            // models take over before the lite one, which writes plainer replies.
+            models: [...new Set([vision.proModel, ...vision.fallbackModels, vision.fastModel])],
+            summaryModels: [...new Set([vision.fastModel, ...vision.fallbackModels, vision.proModel])],
+            budgetMs: 30_000,
+          }
+        : undefined,
+      // Finds products for words the keyword search doesn't know; idle until the embeddings migration is applied.
+      embeddings: vision.geminiKeys.length ? { apiKey: vision.geminiKeys, model: vision.embeddingModel } : undefined,
+      adminBaseUrl: getAppBaseUrl(),
+      defer: (task) => after(() => task().catch((error: unknown) => console.error("Deferred memory update failed", error))),
     });
+    // Housekeeping after the reply, at most every 10 minutes per server instance (the daily cron is the backstop):
+    // replies nobody picked up are marked failed, and owner alerts among them are sent again directly.
+    if (Date.now() - lastStaleSweep > 10 * 60_000) {
+      lastStaleSweep = Date.now();
+      after(async () => {
+        try {
+          const { ownerAlerts } = await repository.markStaleDeliveriesFailed(STALE_DELIVERY_MS);
+          for (const alert of ownerAlerts.slice(0, 5)) await sendGatewayMessage(environment.SUPPORT_WA_ID, `(sent again) ${alert}`);
+        } catch (error) {
+          console.error("Stale delivery sweep failed", error);
+        }
+      });
+    }
     return Response.json(result);
   } catch (error) {
     console.error("Gateway message processing failed", { eventId: parsedMessage.data.eventId, error });

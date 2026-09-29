@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { GeminiError } from "@/ai/gemini";
 import { requireAdmin } from "@/auth/admin";
+import { refreshSearchIndexLater } from "@/catalog/admin/search-index";
 import { fillEmptyFields, readStoredSuggestion, suggestFromProductImage, toStoredSuggestion } from "@/catalog/image-suggestions";
 import { getVisionEnvironment } from "@/config/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -11,13 +12,15 @@ import type { ActionState } from "./actions";
 
 function refresh(productId: string) {
   revalidatePath(`/admin/products/${productId}`);
+  // New AI photo descriptions and filled-in fields change what meaning search knows about the product.
+  refreshSearchIndexLater(productId);
 }
 
 function describeGeminiFailure(error: unknown): string {
   if (error instanceof GeminiError) {
-    if (error.kind === "http" && (error.status === 401 || error.status === 403)) return "Gemini rejected the API key. Check GEMINI_API_KEY.";
-    if (error.kind === "http" && error.status === 404) return "Gemini model not found. Check GEMINI_MODEL.";
-    if (error.kind === "http" && error.status === 429) return "Gemini rate limit or quota reached. Try again shortly.";
+    if (error.kind === "http" && (error.status === 401 || error.status === 403)) return "Gemini rejected every API key. Check GEMINI_API_KEY.";
+    if (error.kind === "http" && error.status === 404) return "Gemini model not found. Check GEMINI_MODEL_PRO.";
+    if (error.kind === "http" && error.status === 429) return "All Gemini keys are rate-limited right now. Try again in a minute.";
     if (error.kind === "timeout") return "Gemini took too long. Try again.";
     if (error.kind === "blocked") return "Gemini declined to analyse this image.";
   }
@@ -26,8 +29,8 @@ function describeGeminiFailure(error: unknown): string {
 
 export async function analyzeProductImage(productId: string, imageId: string): Promise<ActionState> {
   await requireAdmin();
-  const { GEMINI_API_KEY, GEMINI_MODEL } = getVisionEnvironment();
-  if (!GEMINI_API_KEY) return { error: "AI suggestions are off. Set GEMINI_API_KEY in the server environment." };
+  const { geminiKeys, proModel, fastModel, fallbackModels } = getVisionEnvironment();
+  if (!geminiKeys.length) return { error: "AI suggestions are off. Set GEMINI_API_KEY in the server environment." };
 
   const supabase = await createSupabaseServerClient();
   const { data: image, error } = await supabase
@@ -44,14 +47,14 @@ export async function analyzeProductImage(productId: string, imageId: string): P
   try {
     const bytes = Buffer.from(await file.arrayBuffer());
     const mimeType = file.type || (image.storage_path.endsWith(".png") ? "image/png" : image.storage_path.endsWith(".webp") ? "image/webp" : "image/jpeg");
-    const { suggestion } = await suggestFromProductImage({ apiKey: GEMINI_API_KEY, model: GEMINI_MODEL, imageBase64: bytes.toString("base64"), mimeType });
+    const { suggestion, model: usedModel } = await suggestFromProductImage({ apiKey: geminiKeys, model: proModel, fallbackModels: [...fallbackModels, fastModel], imageBase64: bytes.toString("base64"), mimeType });
 
     const { error: updateError } = await supabase
       .from("product_images")
       .update({
         extraction_status: "complete",
         ai_description: suggestion.isProduct ? suggestion.description : null,
-        ai_attributes: toStoredSuggestion(suggestion, GEMINI_MODEL),
+        ai_attributes: toStoredSuggestion(suggestion, usedModel),
       })
       .eq("id", imageId);
     if (updateError) return { error: "Could not save the suggestion." };

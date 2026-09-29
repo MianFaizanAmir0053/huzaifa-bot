@@ -35,7 +35,7 @@ describe("InboundMessageSchema", () => {
 
 describe("BrainResponseSchema", () => {
   it("limits outbound actions to protect the gateway", () => {
-    const actions = Array.from({ length: 5 }, (_, index) => ({
+    const actions = Array.from({ length: 9 }, (_, index) => ({
       actionId: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
       recipientChatId: "923001234567@c.us",
       type: "text",
@@ -80,7 +80,7 @@ describe("media upload contracts", () => {
 });
 describe("DeliveryReportSchema", () => {
   it("accepts sent and failed acknowledgements and rejects empty reports", async () => {
-    const { DeliveryReportSchema } = await import("./index");
+    const { DeliveryReportSchema } = await import("./index.js");
     expect(
       DeliveryReportSchema.parse({
         acknowledgements: [
@@ -90,5 +90,20 @@ describe("DeliveryReportSchema", () => {
       }).acknowledgements,
     ).toHaveLength(2);
     expect(DeliveryReportSchema.safeParse({ acknowledgements: [] }).success).toBe(false);
+  });
+});
+
+describe("agent-era contracts", () => {
+  it("accepts image actions with an https url and rejects http", async () => {
+    const { OutboundActionSchema } = await import("./index.js");
+    const base = { actionId: "7c3a4f0e-8f7b-4a3e-9f58-7bb1d0a4a111", recipientChatId: "923001234567@c.us", type: "image", objectPath: "products/x/y.jpg" };
+    expect(OutboundActionSchema.safeParse({ ...base, url: "https://p.supabase.co/storage/v1/object/public/product-images/products/x/y.jpg" }).success).toBe(true);
+    expect(OutboundActionSchema.safeParse({ ...base, url: "http://p.supabase.co/x.jpg" }).success).toBe(false);
+  });
+
+  it("parses owner messages with default alternate ids", async () => {
+    const { OwnerMessageSchema } = await import("./index.js");
+    const parsed = OwnerMessageSchema.parse({ messageId: "true_x@lid_1", chatId: "98100@lid", occurredAt: "2026-09-29T10:00:00.000Z", type: "text", text: "Ji main call karta hoon" });
+    expect(parsed.alternateChatIds).toEqual([]);
   });
 });

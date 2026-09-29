@@ -10,6 +10,7 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "import:catalog": "tsx scripts/import-catalog.ts",
+    "eval": "tsx evals/run-evals.ts",
     "create-admin": "node scripts/create-admin.mjs"
   },
   "dependencies": {

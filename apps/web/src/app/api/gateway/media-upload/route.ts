@@ -1,3 +1,4 @@
+import { readLimitedBody } from "@/security/request-body";
 import { createClient } from "@supabase/supabase-js";
 import { MediaUploadGrantSchema, MediaUploadRequestSchema } from "@huzaifa/contracts";
 import { getStorageEnvironment } from "@/config/env";
@@ -7,7 +8,9 @@ import { createInboundMediaPath } from "./path";
 export const runtime = "nodejs";
 
 export async function POST(request: Request): Promise<Response> {
-  const body = await request.text();
+  const read = await readLimitedBody(request);
+  if (!read.ok) return read.response;
+  const body = read.body;
   let environment;
   try {
     environment = getStorageEnvironment();

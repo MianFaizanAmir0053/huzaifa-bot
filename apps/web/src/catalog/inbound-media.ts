@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { InboundImage } from "@/agent/classifier";
+import type { InboundImage } from "@/agent/agent";
 
 // Must match createInboundMediaPath: messages/<24 hex>/<32 hex>.<ext>
 const INBOUND_PATH = /^messages\/[a-f0-9]{24}\/[a-f0-9]{32}\.(jpg|png|webp)$/;

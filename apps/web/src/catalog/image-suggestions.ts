@@ -61,19 +61,22 @@ export const ImageSuggestionSchema = z
 export type ImageSuggestion = z.output<typeof ImageSuggestionSchema>;
 
 export type SuggestImageInput = {
-  apiKey: string;
+  apiKey: string | readonly string[];
   model: string;
+  fallbackModels?: readonly string[];
   imageBase64: string;
   mimeType: string;
   fetchImpl?: GeminiJsonRequest["fetchImpl"];
 };
 
-export type SuggestImageResult = { suggestion: ImageSuggestion; inputTokens: number | null; outputTokens: number | null };
+export type SuggestImageResult = { suggestion: ImageSuggestion; model: string; inputTokens: number | null; outputTokens: number | null };
 
 export async function suggestFromProductImage(input: SuggestImageInput): Promise<SuggestImageResult> {
   const result = await generateGeminiJson({
     apiKey: input.apiKey,
     model: input.model,
+    fallbackModels: input.fallbackModels,
+    budgetMs: 60_000,
     systemInstruction: SYSTEM_INSTRUCTION,
     parts: [{ inline_data: { mime_type: input.mimeType, data: input.imageBase64 } }, { text: USER_PROMPT }],
     responseJsonSchema: imageSuggestionJsonSchema,
@@ -81,7 +84,7 @@ export async function suggestFromProductImage(input: SuggestImageInput): Promise
     fetchImpl: input.fetchImpl,
   });
   const suggestion = ImageSuggestionSchema.parse(result.json);
-  return { suggestion, inputTokens: result.inputTokens, outputTokens: result.outputTokens };
+  return { suggestion, model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens };
 }
 
 // Shape persisted in product_images.ai_attributes.

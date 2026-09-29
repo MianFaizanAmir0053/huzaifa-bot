@@ -1,3 +1,4 @@
+import { readLimitedBody } from "@/security/request-body";
 import { DeliveryReportSchema } from "@huzaifa/contracts";
 import { getStorageEnvironment } from "@/config/env";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
@@ -7,7 +8,9 @@ export const runtime = "nodejs";
 
 // Gateway reports whether each outbound action reached WhatsApp. Updates messages.delivery_state by action ID.
 export async function POST(request: Request): Promise<Response> {
-  const body = await request.text();
+  const read = await readLimitedBody(request);
+  if (!read.ok) return read.response;
+  const body = read.body;
   let environment;
   try {
     environment = getStorageEnvironment();
@@ -52,6 +55,12 @@ export async function POST(request: Request): Promise<Response> {
     updated += data.length;
     if (acknowledgement.status === "failed") {
       console.warn("Outbound action failed to deliver", { actionId: acknowledgement.actionId, errorCode: acknowledgement.errorCode });
+      // If this was the support alert for a handoff, flag it; the chat stays paused either way.
+      await client
+        .from("handoffs")
+        .update({ notification_error: acknowledgement.errorCode ?? "delivery_failed" })
+        .eq("notification_action_id", acknowledgement.actionId)
+        .is("notification_error", null);
     }
   }
 

@@ -79,10 +79,25 @@ describe("parseVariantRows", () => {
     expect(result).toEqual({
       ok: true,
       variants: [
-        { sizeLabel: "Medium", normalizedSize: "M", stockQty: 3, variantSku: "LAWN-001-M" },
-        { sizeLabel: "L", normalizedSize: "L", stockQty: 0, variantSku: null },
+        { sizeLabel: "Medium", normalizedSize: "M", stockQty: 3, variantSku: "LAWN-001-M", stockLoaded: null },
+        { sizeLabel: "L", normalizedSize: "L", stockQty: 0, variantSku: null, stockLoaded: null },
       ],
     });
+  });
+
+  it("remembers the stock each size had when the form was opened, unless the size was renamed", () => {
+    const result = parseVariantRows(
+      form([
+        ["sizeLabel", "M"], ["stockQty", "6"], ["variantSku", ""], ["loadedSize", "Medium"], ["loadedStock", "5"],
+        ["sizeLabel", "XL"], ["stockQty", "2"], ["variantSku", ""], ["loadedSize", "L"], ["loadedStock", "4"],
+        ["sizeLabel", "S"], ["stockQty", "1"], ["variantSku", ""], ["loadedSize", ""], ["loadedStock", ""],
+      ]),
+    );
+    expect(result.ok && result.variants.map((variant) => [variant.normalizedSize, variant.stockLoaded])).toEqual([
+      ["M", 5],
+      ["XL", null],
+      ["S", null],
+    ]);
   });
 
   it("rejects duplicate sizes and negative stock", () => {

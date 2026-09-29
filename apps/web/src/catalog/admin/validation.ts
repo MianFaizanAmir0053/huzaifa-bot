@@ -117,17 +117,23 @@ const VariantRowSchema = z.object({
   variantSku: optionalText(64),
 });
 
-export type VariantInput = { sizeLabel: string; normalizedSize: string; stockQty: number; variantSku: string | null };
+// stockLoaded: the stock this size had when the form was opened (null for a new or renamed size); used to
+// save the owner's change as a difference, so sales or returns meanwhile aren't overwritten.
+export type VariantInput = { sizeLabel: string; normalizedSize: string; stockQty: number; variantSku: string | null; stockLoaded?: number | null };
 
 export type VariantParseResult = { ok: true; variants: VariantInput[] } | { ok: false; error: string };
 
-export type VariantRowInput = { sizeLabel: string; stockQty: string; variantSku: string };
+export type VariantRowInput = { sizeLabel: string; stockQty: string; variantSku: string; loadedSize?: string; loadedStock?: string };
 
 export function parseVariantRows(formData: FormData): VariantParseResult {
   const sizes = formData.getAll("sizeLabel").map(String);
   const stocks = formData.getAll("stockQty").map(String);
   const skus = formData.getAll("variantSku").map(String);
-  return parseVariantList(sizes.map((sizeLabel, index) => ({ sizeLabel, stockQty: stocks[index] ?? "", variantSku: skus[index] ?? "" })));
+  const loadedSizes = formData.getAll("loadedSize").map(String);
+  const loadedStocks = formData.getAll("loadedStock").map(String);
+  return parseVariantList(
+    sizes.map((sizeLabel, index) => ({ sizeLabel, stockQty: stocks[index] ?? "", variantSku: skus[index] ?? "", loadedSize: loadedSizes[index], loadedStock: loadedStocks[index] })),
+  );
 }
 
 export function parseVariantList(rows: VariantRowInput[]): VariantParseResult {
@@ -145,7 +151,10 @@ export function parseVariantList(rows: VariantRowInput[]): VariantParseResult {
     const normalizedSize = normalizeSize(parsed.data.sizeLabel);
     if (seen.has(normalizedSize)) return { ok: false, error: `Size ${normalizedSize} is listed twice.` };
     seen.add(normalizedSize);
-    variants.push({ ...parsed.data, normalizedSize, variantSku: parsed.data.variantSku?.toUpperCase() ?? null });
+    const loaded = rows[index]?.loadedStock?.trim();
+    const sameSize = rows[index]?.loadedSize !== undefined && normalizeSize(rows[index]!.loadedSize!) === normalizedSize;
+    const stockLoaded = sameSize && loaded && /^\d{1,6}$/.test(loaded) ? Number(loaded) : null;
+    variants.push({ ...parsed.data, normalizedSize, variantSku: parsed.data.variantSku?.toUpperCase() ?? null, stockLoaded });
   }
 
   if (variants.length > 40) return { ok: false, error: "At most 40 sizes per product." };

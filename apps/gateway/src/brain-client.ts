@@ -1,10 +1,17 @@
 import {
   BrainResponseSchema,
+  DeliveryReportSchema,
   MediaUploadGrantSchema,
+  OwnerMessageResultSchema,
+  OwnerMessageSchema,
+  type DeliveryAcknowledgement,
   type InboundMessage,
   type MediaUploadGrant,
   type MediaUploadRequest,
+  type OwnerMessage,
+  type OwnerMessageResult,
 } from "@huzaifa/contracts";
+import { BrainRequestError } from "./retry.js";
 import { createGatewaySignature } from "./signature.js";
 
 export type BrainClientOptions = {
@@ -36,6 +43,12 @@ export class BrainClient {
     await this.signedRequest("/api/gateway/deliveries", report);
   }
 
+  // The owner typed in a customer chat; the brain records it and pauses the bot there.
+  async reportOwnerMessage(message: OwnerMessage): Promise<OwnerMessageResult> {
+    const response = await this.signedRequest("/api/gateway/owner-messages", OwnerMessageSchema.parse(message));
+    return OwnerMessageResultSchema.parse(await response.json());
+  }
+
   async uploadMedia(grant: MediaUploadGrant, bytes: Uint8Array, mimeType: MediaUploadRequest["mimeType"]): Promise<void> {
     const uploadUrl = new URL(grant.signedUrl);
     if (uploadUrl.protocol !== "https:" || !uploadUrl.pathname.includes("/storage/v1/object/upload/sign/inbound-media/")) {
@@ -54,7 +67,7 @@ export class BrainClient {
       body,
       signal: AbortSignal.timeout(this.options.timeoutMs),
     });
-    if (!response.ok) throw new Error(`Media upload failed with status ${response.status}`);
+    if (!response.ok) throw new BrainRequestError(`Media upload failed with status ${response.status}`, response.status);
   }
 
   private async signedRequest(path: string, payload: unknown): Promise<Response> {
@@ -68,4 +81,12 @@ export class BrainClient {
         "x-huzaifa-signature": createGatewaySignature(body, timestamp, this.options.hmacSecret),
       },
       body,
-      signal: Ab
+      signal: AbortSignal.timeout(this.options.timeoutMs),
+    });
+
+    if (!response.ok) {
+      throw new BrainRequestError(`Brain request ${path} failed with status ${response.status}`, response.status);
+    }
+    return response;
+  }
+}

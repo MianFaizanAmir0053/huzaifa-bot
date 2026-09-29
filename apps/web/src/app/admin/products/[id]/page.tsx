@@ -18,7 +18,7 @@ export default async function ProductPage({ params }: { params: Promise<{ id: st
   const product = await getAdminProduct(id);
   if (!product) notFound();
 
-  const aiEnabled = Boolean(getVisionEnvironment().GEMINI_API_KEY);
+  const aiEnabled = getVisionEnvironment().geminiKeys.length > 0;
   const blockers = getPublishBlockers({ ...product, imageCount: product.images.length, variantCount: product.variants.length });
 
   return (
@@ -83,7 +83,8 @@ export default async function ProductPage({ params }: { params: Promise<{ id: st
       <section className="panel" aria-labelledby="sizes-heading">
         <h2 id="sizes-heading">Sizes and stock</h2>
         <p className="muted">Customers are told a size is available only when stock is above 0. Exact counts are never shared.</p>
-        <VariantsEditor action={saveVariants.bind(null, product.id)} variants={product.variants} />
+        {/* Keyed by the saved values: after a save the editor restarts from the new stock. */}
+        <VariantsEditor key={JSON.stringify(product.variants)} action={saveVariants.bind(null, product.id)} variants={product.variants} />
       </section>
 
       <section className="panel" aria-labelledby="details-heading">

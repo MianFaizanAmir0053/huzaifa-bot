@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { parseGeminiKeys, parseModelList } from "../src/ai/gemini";
 import { PRODUCT_IMAGE_MAX_BYTES } from "../src/catalog/admin/validation";
 import { fillEmptyFields, suggestFromProductImage, toStoredSuggestion } from "../src/catalog/image-suggestions";
 import { contentAddressedImageName, parseManifest, type ManifestRow } from "../src/catalog/import/manifest";
@@ -114,9 +115,9 @@ async function main() {
   const url = env.NEXT_PUBLIC_SUPABASE_URL;
   const serviceKey = env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !serviceKey) throw new Error("NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required (apps/web/.env.local).");
-  const geminiKey = env.GEMINI_API_KEY;
-  const geminiModel = env.GEMINI_MODEL || "gemini-3.5-flash-lite";
-  if (suggest && !geminiKey) throw new Error("--suggest needs GEMINI_API_KEY.");
+  const geminiKeys = parseGeminiKeys(env.GEMINI_API_KEY);
+  const geminiModel = env.GEMINI_MODEL_PRO || env.GEMINI_MODEL || "gemini-flash-latest";
+  if (suggest && !geminiKeys.length) throw new Error("--suggest needs GEMINI_API_KEY.");
 
   const client = createClient(url, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
   const absoluteManifest = resolve(manifestPath!);
@@ -192,14 +193,14 @@ async function main() {
         nextSort += 1;
         report.imagesAdded += 1;
 
-        if (suggest && geminiKey) {
+        if (suggest && geminiKeys.length) {
           let attempt = 0;
           while (true) {
             try {
-              const { suggestion } = await suggestFromProductImage({ apiKey: geminiKey, model: geminiModel, imageBase64: image.bytes.toString("base64"), mimeType: image.mimeType });
+              const { suggestion, model: usedModel } = await suggestFromProductImage({ apiKey: geminiKeys, model: geminiModel, fallbackModels: parseModelList(`${env.GEMINI_MODEL_FAST ?? "gemini-flash-lite-latest"},${env.GEMINI_MODEL_FALLBACKS ?? ""}`), imageBase64: image.bytes.toString("base64"), mimeType: image.mimeType });
               await client
                 .from("product_images")
-                .update({ extraction_status: "complete", ai_description: suggestion.isProduct ? suggestion.description : null, ai_attributes: toStoredSuggestion(suggestion, geminiModel) })
+                .update({ extraction_status: "complete", ai_description: suggestion.isProduct ? suggestion.description : null, ai_attributes: toStoredSuggestion(suggestion, usedModel) })
                 .eq("id", inserted.id);
               const { data: current } = await client.from("products").select("color, material, description, style_tags").eq("id", productId).single();
               if (current) {

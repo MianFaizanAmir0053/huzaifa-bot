@@ -15,10 +15,32 @@ import {
   productImageExtension,
   type ProductImageMimeType,
 } from "@/catalog/admin/validation";
+import { refreshSearchIndexLater } from "@/catalog/admin/search-index";
+import { refreshProductEmbeddings } from "@/catalog/embeddings";
+import { getVisionEnvironment } from "@/config/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
 
 export type ActionState = { error?: string; message?: string };
+
+// Products page button: embed every active product whose text changed (or that was never embedded).
+export async function rebuildSearchIndex(): Promise<ActionState> {
+  await requireAdmin();
+  const { geminiKeys, embeddingModel } = getVisionEnvironment();
+  if (!geminiKeys.length) return { error: "Meaning search needs GEMINI_API_KEY in the server environment." };
+  try {
+    const result = await refreshProductEmbeddings(createSupabaseServiceClient(), { apiKey: geminiKeys, model: embeddingModel, budgetMs: 45_000 });
+    if (!result.available) return { error: "The database doesn't have meaning search yet. Apply migration 202609290004_product_embeddings.sql first." };
+    revalidatePath("/admin/products");
+    const parts = [`${result.updated} updated`, `${result.unchanged} already up to date`];
+    if (result.failed) parts.push(`${result.failed} failed (try again)`);
+    if (result.remaining) parts.push(`${result.remaining} left — press again to continue`);
+    return result.failed ? { error: `Search index: ${parts.join(", ")}.` } : { message: `Search index: ${parts.join(", ")}.` };
+  } catch (error) {
+    console.error("Search index rebuild failed", error);
+    return { error: "Could not update the search index. Try again." };
+  }
+}
 
 const PRODUCT_IMAGES_BUCKET = "product-images";
 
@@ -35,6 +57,8 @@ function describeDatabaseError(error: PostgrestError, fallback: string): string 
 function refreshProduct(productId: string) {
   revalidatePath("/admin/products");
   revalidatePath(`/admin/products/${productId}`);
+  // Meaning search follows name/description/tag/photo edits (skipped when nothing it uses changed).
+  refreshSearchIndexLater(productId);
 }
 
 async function loadCounts(productId: string) {
@@ -140,14 +164,22 @@ export async function saveVariants(productId: string, _previous: ActionState, fo
 
   const supabase = await createSupabaseServerClient();
   if (parsed.variants.length > 0) {
+    // Stock is saved as the owner's change on top of the current stock: orders confirmed or cancelled while
+    // this page was open (which take or give back stock) are kept, not overwritten with the old numbers.
+    const { data: currentRows } = await supabase.from("product_variants").select("normalized_size, stock_qty").eq("product_id", productId);
+    const current = new Map((currentRows ?? []).map((row) => [row.normalized_size as string, row.stock_qty as number]));
     const { error } = await supabase.from("product_variants").upsert(
-      parsed.variants.map((variant) => ({
-        product_id: productId,
-        size_label: variant.sizeLabel,
-        normalized_size: variant.normalizedSize,
-        stock_qty: variant.stockQty,
-        variant_sku: variant.variantSku,
-      })),
+      parsed.variants.map((variant) => {
+        const now = current.get(variant.normalizedSize);
+        const stock = variant.stockLoaded != null && now !== undefined ? Math.max(0, now + (variant.stockQty - variant.stockLoaded)) : variant.stockQty;
+        return {
+          product_id: productId,
+          size_label: variant.sizeLabel,
+          normalized_size: variant.normalizedSize,
+          stock_qty: stock,
+          variant_sku: variant.variantSku,
+        };
+      }),
       { onConflict: "product_id,normalized_size" },
     );
     if (error) return { error: describeDatabaseError(error, "Could not save sizes.") };
