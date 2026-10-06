@@ -32,7 +32,28 @@ pnpm --filter @huzaifa/web dev              # http://localhost:3000/admin
 pnpm --filter @huzaifa/gateway dev          # http://localhost:3001, QR at /admin/whatsapp
 ```
 
-Bulk catalog import: `pnpm --filter @huzaifa/web import:catalog path/to/manifest.csv --dry-run` (see `apps/web/scripts/import-catalog.ts`).
+## Adding many products at once
+
+The shop sends photos plus one line per product: a **code**, the **price** and the **sizes with how many of each**. Everything else (name, category, colour, fabric, tags, description) is read from the main photo by Gemini, unless the sheet already says it.
+
+1. Make a folder `catalog/` in the repo root (git ignores it) with:
+   - either the sheet as CSV (start from `docs/catalog/products-template.csv`; Excel/Google Sheets → Download → CSV), with columns `code, price, sizes` and optionally `name, category, colour, fabric, notes`;
+   - or `products.txt` with one WhatsApp-style line per product, `K12 | 3500 | S2 M3 L1 | lawn, 3 piece` (a whole copied WhatsApp chat works: other lines are skipped);
+   - the photos, named by code (`K12-1.jpg`, `K12-2.jpg`, the `-1` photo is the main one) or in a folder per code (`K12/…`).
+
+   Sizes are written like `S2 M3 L1`, `Free 5` or `32-2 34-1`.
+2. Check it without changing anything:
+   ```powershell
+   pnpm import:products ./catalog --dry-run
+   ```
+   It lists the photos found per product, what the AI will fill, rows with problems, and photos that match no code.
+3. Import and put complete products live:
+   ```powershell
+   pnpm import:products ./catalog --publish
+   ```
+   Products missing something stay drafts and the report says what. Re-running is safe: products match by code, photos aren't uploaded twice, sizes are updated (handy for stock updates). Live products are added to meaning and photo search straight away.
+
+A short guide to send the shop owner is in `docs/catalog/client-guide.md`.
 
 ## How a reply is made
 

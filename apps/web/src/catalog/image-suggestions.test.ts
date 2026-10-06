@@ -18,6 +18,7 @@ function geminiResponse(payload: unknown, init: { status?: number; finishReason?
 
 const rawSuggestion = {
   is_product: true,
+  name: " Sky Blue  Printed Lawn Suit ",
   category: " Lawn Suit ",
   color: "Sky  Blue",
   material: "lawn",
@@ -41,6 +42,7 @@ describe("suggestFromProductImage", () => {
 
     expect(result.suggestion).toEqual({
       isProduct: true,
+      name: "Sky Blue Printed Lawn Suit",
       category: "lawn suit",
       color: "Sky Blue",
       material: "lawn",
@@ -66,6 +68,7 @@ describe("suggestFromProductImage", () => {
 describe("fillEmptyFields", () => {
   const suggestion: ImageSuggestion = {
     isProduct: true,
+    name: "Sky Blue Lawn Suit",
     category: "lawn suit",
     color: "sky blue",
     material: "lawn",

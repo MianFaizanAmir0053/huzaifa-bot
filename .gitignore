@@ -15,3 +15,6 @@ Thumbs.db
 apps/gateway/.wwebjs_auth/
 apps/gateway/.wwebjs_cache/
 apps/web/evals/results/
+
+# Product photos and sheets from the shop for pnpm import:products (never committed).
+/catalog/

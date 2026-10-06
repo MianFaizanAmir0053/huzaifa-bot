@@ -12,6 +12,7 @@
     "dev:gateway": "pnpm --filter @huzaifa/gateway dev",
     "lint": "pnpm --recursive --if-present lint",
     "test": "pnpm --recursive --if-present test",
-    "typecheck": "pnpm --recursive --if-present typecheck"
+    "typecheck": "pnpm --recursive --if-present typecheck",
+    "import:products": "pnpm --filter @huzaifa/web import:catalog"
   }
 }

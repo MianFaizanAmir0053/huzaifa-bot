@@ -73,6 +73,12 @@ const CATCH_UP_MAX_MESSAGES = 10;
 // A backlog is answered one chat at a time, each given this long, so it doesn't hit the brain all at once.
 const CATCH_UP_ANSWER_WAIT_MS = 60_000;
 const CHAT_LIST_TIMEOUT_MS = 30_000;
+// In-page lookup of the chats with unread messages: id (WhatsApp Web renamed `_serialized` to `$1` in 2026) and the
+// last activity time, nothing else.
+const UNREAD_CHATS_SCRIPT = `window.require("WAWebCollections").Chat.getModelsArray()
+  .filter((chat) => chat.unreadCount > 0 && chat.id)
+  .map((chat) => ({ id: chat.id._serialized || chat.id.$1, t: chat.t || 0 }))`;
+type UnreadChat = { id: string; t: number };
 // Silent stall: the session looks connected but stops reporting messages (2026-09-29). Live messages arrive
 // within seconds, so unread ones this old that never came through mean the hooks are broken.
 const STALL_CHECK_INTERVAL_MS = 5 * 60_000;
@@ -577,7 +583,7 @@ export class WhatsAppWebTransport implements WhatsAppTransport {
 
   // Per waiting customer chat (longest-waiting first), the unread messages that were never handed over.
   private async findMissedMessages(): Promise<Message[][] | undefined> {
-    const chats = await withTimeout(this.client.getChats(), CHAT_LIST_TIMEOUT_MS, undefined);
+    const chats = await this.chatsWithUnread();
     if (!chats) {
       if (this.health.missedMessageCheck !== false) this.logger.warn({}, "Could not list WhatsApp chats to look for missed messages");
       this.health.missedMessageCheck = false;
@@ -592,6 +598,24 @@ export class WhatsAppWebTransport implements WhatsAppTransport {
       if (messages.length) missed.push(messages);
     }
     return missed;
+  }
+
+  // Chats with unread messages, the longest-waiting first. getChats() builds every chat in full (group details, the
+  // last message fetched from WhatsApp's servers), which on a number with hundreds of chats takes longer than a scan
+  // may wait; so WhatsApp Web is asked for the unread ones only, and just those are loaded.
+  private async chatsWithUnread(): Promise<Chat[] | undefined> {
+    const page = (this.client as unknown as { pupPage?: { evaluate?(script: string): Promise<unknown> } | null }).pupPage;
+    if (!page?.evaluate) return withTimeout(this.client.getChats(), CHAT_LIST_TIMEOUT_MS, undefined);
+    // A string, not a function: it runs as written in the page, untouched by the TypeScript build.
+    const unread = await withTimeout(page.evaluate(UNREAD_CHATS_SCRIPT).then((found) => (Array.isArray(found) ? (found as UnreadChat[]) : undefined)), PAGE_CALL_TIMEOUT_MS, undefined);
+    if (!unread) return undefined;
+    const ids = unread
+      .filter((chat) => typeof chat.id === "string" && !NON_CUSTOMER_CHAT.test(chat.id))
+      .sort((a, b) => a.t - b.t)
+      .slice(0, CATCH_UP_MAX_CHATS)
+      .map((chat) => chat.id);
+    const chats = await Promise.all(ids.map((id) => withTimeout(this.client.getChatById(id), PAGE_CALL_TIMEOUT_MS, undefined)));
+    return chats.filter((chat): chat is Chat => chat !== undefined);
   }
 
   // Hands one chat's missed messages over through the live path, in order, then waits (bounded) for the answer.

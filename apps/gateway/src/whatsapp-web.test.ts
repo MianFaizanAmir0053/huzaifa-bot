@@ -662,3 +662,34 @@ describe("chat list health", () => {
     expect(transport.getSessionSnapshot().missedMessageCheck).toBe(true);
   });
 });
+
+describe("unread chat lookup", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("loads only the chats with unread messages, never the whole chat list", async () => {
+    const { transport, connect } = await startedTransport();
+    const handed: string[] = [];
+    transport.onMessage(async (message) => {
+      handed.push(message.text ?? "");
+    });
+    const group = "120363000000000000@g.us";
+    const waiting = chat(customer, [stored(customer, "U1", { body: "price?", timestamp: sentAgo(20 * MINUTE) })]);
+    const client = connect();
+    client.getChats = vi.fn(async () => {
+      throw new Error("too slow on a big account");
+    });
+    (client.pupPage as unknown as { evaluate: unknown }).evaluate = vi.fn(async () => [
+      { id: group, t: sentAgo(MINUTE) },
+      { id: customer, t: sentAgo(20 * MINUTE) },
+    ]);
+    client.getChatById = vi.fn(async (id: string) => (id === customer ? waiting : undefined));
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(handed).toEqual(["price?"]);
+    expect(client.getChats).not.toHaveBeenCalled();
+    expect(client.getChatById).toHaveBeenCalledExactlyOnceWith(customer);
+    expect(transport.getSessionSnapshot().missedMessageCheck).toBe(true);
+  });
+});
