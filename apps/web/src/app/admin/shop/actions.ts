@@ -36,6 +36,8 @@ export async function saveShopSettingsAction(_previous: ActionState, formData: F
     ordersEnabled: formData.get("ordersEnabled") === "on",
     deliveryFeePkr: optionalAmount(field("deliveryFeePkr")),
     freeDeliveryFromPkr: optionalAmount(field("freeDeliveryFromPkr")),
+    cartReminderMinutes: field("cartReminderMinutes") ? Number(field("cartReminderMinutes")) : null,
+    ownerFollowUps: formData.get("ownerFollowUps") === "on",
   });
   if (!parsed.success) {
     const issue = parsed.error.issues[0];

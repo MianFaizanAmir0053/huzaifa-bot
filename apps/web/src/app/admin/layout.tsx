@@ -16,6 +16,7 @@ export default async function AdminLayout({ children }: Readonly<{ children: Rea
       <header className="admin-header">
         <nav className="admin-nav" aria-label="Admin">
           <strong>Huzaifa Commerce Desk</strong>
+          <NavLink href="/admin">Today</NavLink>
           <NavLink href="/admin/products">Products</NavLink>
           <NavLink href="/admin/conversations">
             Conversations

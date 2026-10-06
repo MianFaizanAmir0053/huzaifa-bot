@@ -1,6 +1,7 @@
 import { after } from "next/server";
 import { InboundMessageSchema } from "@huzaifa/contracts";
 import { processInboundMessage } from "@/agent/orchestrator";
+import { createProductPhotoLoader } from "@/catalog/image-embeddings";
 import { createInboundImageLoader } from "@/catalog/inbound-media";
 import { createSupabaseBrainRepository } from "@/catalog/repository";
 import { getAppBaseUrl, getServerEnvironment, getVisionEnvironment } from "@/config/env";
@@ -82,6 +83,10 @@ export async function POST(request: Request): Promise<Response> {
         : undefined,
       // Finds products for words the keyword search doesn't know; idle until the embeddings migration is applied.
       embeddings: vision.geminiKeys.length ? { apiKey: vision.geminiKeys, model: vision.embeddingModel } : undefined,
+      // Finds the products a customer's photo shows; idle until the photo search migration is applied and the
+      // product photos are indexed (that happens on its own as photos are added).
+      photoSearch: vision.geminiKeys.length ? { apiKey: vision.geminiKeys, model: vision.imageEmbeddingModel } : undefined,
+      loadProductImage: createProductPhotoLoader(productImagePublicUrl),
       adminBaseUrl: getAppBaseUrl(),
       defer: (task) => after(() => task().catch((error: unknown) => console.error("Deferred memory update failed", error))),
     });

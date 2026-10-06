@@ -1,9 +1,18 @@
 import { randomUUID } from "node:crypto";
 import type { BrainResponse, InboundMessage, Language, OutboundAction } from "@huzaifa/contracts";
-import { embedText, GeminiError } from "../ai/gemini";
+import { embedImage, embedText, GeminiError } from "../ai/gemini";
 import { OrderError, type AgentRunRecord, type BrainRepository } from "../catalog/repository";
 import { browseCatalog, extractFilters, hasProductIntent, searchCatalog, type CatalogItem } from "../catalog/search";
-import { confidentHit, MIN_SEMANTIC_SIMILARITY, semanticQueryFor, type SemanticHit } from "../catalog/semantic";
+import {
+  confidentHit,
+  confidentPhotoHit,
+  MIN_PHOTO_SIMILARITY,
+  MIN_SEMANTIC_SIMILARITY,
+  photoCandidates,
+  semanticQueryFor,
+  type PhotoHit,
+  type SemanticHit,
+} from "../catalog/semantic";
 import {
   deliveryFeeFor,
   isAffirmative,
@@ -23,7 +32,7 @@ import { DEFAULT_SHOP_SETTINGS, shopStatus, type ShopSettings, type ShopStatus }
 import { AgentRejectedError, runAgent, type AgentResult, type InboundImage } from "./agent";
 import { composeReply, createProductRefs, refFor, type ComposeResult } from "./compose";
 import { clearLanguage, detectLanguage, fallbackDraft } from "./fallback";
-import { formatHistory, historyFromMessages, shownProductIds } from "./memory";
+import { formatHistory, historyFromMessages, recentCardProductIds, shownProductIds } from "./memory";
 import { AGENT_PROMPT_VERSION, buildTurnContext, describeFilters, productLine } from "./prompt";
 import { shouldRefreshSummary, summarizeConversation } from "./summary";
 
@@ -65,6 +74,13 @@ const HISTORY_LIMIT = 16;
 const TURN_DEADLINE_MS = 38_000;
 // An alert that failed or went unanswered this long is sent again when the customer asks again.
 const REALERT_AFTER_MS = 3 * 60 * 60 * 1_000;
+// The gateway re-delivers messages it missed while it was down, with their original time; older than this, the
+// reply apologises for the wait.
+const LATE_REPLY_AFTER_MS = 10 * 60_000;
+// Photo search may delay the reply this long at most (embedding the customer's photo, then matching it).
+const PHOTO_SEARCH_MS = 6_000;
+// Shop photos attached next to the customer's photo for the model to compare (each costs a few hundred tokens).
+const REFERENCE_PHOTOS = 2;
 
 export type OrchestratorDependencies = {
   repository: BrainRepository;
@@ -84,6 +100,11 @@ export type OrchestratorDependencies = {
   };
   // Meaning-based product search (Gemini embeddings + match_products). Omit to use keywords only.
   embeddings?: { apiKey: string | readonly string[]; model: string; fetchImpl?: typeof fetch };
+  // Photo search (multimodal Gemini embeddings + match_product_images): finds the products a customer's photo looks
+  // like. Omit to leave photos to the reply model alone.
+  photoSearch?: { apiKey: string | readonly string[]; model: string; fetchImpl?: typeof fetch };
+  // A shop photo (product-images path) for the reply model to compare with the customer's; null to skip it.
+  loadProductImage?: (storagePath: string) => Promise<InboundImage | null>;
   // Where the admin lives (e.g. https://shop.example.com), for links in the owner's order alerts.
   adminBaseUrl?: string;
   loadImage?: (objectPath: string) => Promise<InboundImage | null>;
@@ -123,6 +144,34 @@ function describeError(error: unknown): string {
   if (error instanceof AgentRejectedError) return "agent_fact_check";
   return "agent_failed";
 }
+
+// The task's result, or a timeout error once `ms` have passed (the task is then left to finish unobserved).
+function withTimeout<T>(ms: number, task: () => Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new GeminiError(`Timed out after ${ms}ms`, "timeout")), ms);
+  });
+  return Promise.race([task(), timeout]).finally(() => clearTimeout(timer));
+}
+
+// "35 minutes", "about 5 hours", "about 2 days": how long a re-delivered message waited.
+function describeWait(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 90) return `${minutes} minutes`;
+  const hours = Math.round(minutes / 60);
+  return hours < 36 ? `about ${hours} hours` : `about ${Math.round(hours / 24)} days`;
+}
+
+type PhotoLookup = {
+  // Every product found (best photo each), for the rules fallback's "is it this one?".
+  hits: PhotoHit[];
+  // The ones the model is asked to compare.
+  candidates: PhotoHit[];
+  // Shop photos of the best candidates that loaded in time.
+  references: { productId: string; image: InboundImage }[];
+  ms: number;
+  error?: string;
+};
 
 // The owner (or the support phone) writing to the bot is not a customer conversation.
 function isSupportChat(message: InboundMessage, supportChatId: string): boolean {
@@ -313,6 +362,12 @@ export async function processInboundMessage(message: InboundMessage, deps: Orche
   const ordersOn = orderState.available && shop.ordersEnabled;
   const pricing: DeliveryPricing = { deliveryFeePkr: shop.deliveryFeePkr, freeDeliveryFromPkr: shop.freeDeliveryFromPkr };
   const whatsappPhone = message.phoneNumber ?? contact?.phoneNumber ?? (message.chatId.endsWith("@c.us") ? message.chatId.slice(0, -5) : null);
+  // Re-delivered after an outage: say sorry for the wait, once — not when a reply already went out after they wrote
+  // this (an earlier message of the same backlog got the apology).
+  const sentAt = Date.parse(message.occurredAt);
+  const waitedMs = now.getTime() - sentAt;
+  const late = waitedMs > LATE_REPLY_AFTER_MS && !rows.some((row) => row.direction === "outbound" && row.source !== "system" && Date.parse(row.occurredAt) > sentAt);
+  if (late) run.diagnostics = { ...run.diagnostics, lateMinutes: Math.round(waitedMs / 60_000) };
 
   // Deterministic retrieval first: most turns need no tool call at all.
   const filters = extractFilters(text);
@@ -328,19 +383,69 @@ export async function processInboundMessage(message: InboundMessage, deps: Orche
   };
   const semanticQuery = embeddings ? semanticQueryFor(text, filters, search) : null;
   const semanticStarted = Date.now();
-  const [semanticHits, image] = await Promise.all([
+  // The customer's photo: for the model to look at, and for photo search (which also works without the model).
+  // A catalog without photos has nothing to match: no embedding call until the shop adds some.
+  // Nor while the photo-search migration is known to be missing (the repository rechecks every 10 minutes).
+  const photoSearch = hasPhoto && catalog.some((product) => product.imagePaths.length > 0) && (repository.photoSearchReady?.() ?? true) ? deps.photoSearch : undefined;
+  const imageLoad = hasPhoto && deps.loadImage && (deps.agent || photoSearch) ? deps.loadImage(message.media!.objectPath).catch(() => null) : Promise.resolve(null);
+  // Which products the photo looks like (often it's a screenshot of the shop's own post). Similarity only ranks
+  // candidates; the model compares their shop photos with the customer's before calling anything the same item.
+  const findByPhoto = async (search: NonNullable<OrchestratorDependencies["photoSearch"]>): Promise<PhotoLookup> => {
+    const started = Date.now();
+    try {
+      const hits = await withTimeout(PHOTO_SEARCH_MS, async () => {
+        const loaded = await imageLoad;
+        if (!loaded) throw new Error("photo not loaded");
+        const vector = await embedImage({ apiKey: search.apiKey, model: search.model, image: loaded, timeoutMs: 5_000, fetchImpl: search.fetchImpl });
+        return repository.matchProductImages(vector, 5, MIN_PHOTO_SIMILARITY);
+      });
+      const known = hits.filter((hit) => products.has(hit.id));
+      const candidates = photoCandidates(known);
+      const loadProductImage = deps.agent ? deps.loadProductImage : undefined;
+      // Slow or big shop photos come back null and are skipped: the model then compares by description.
+      const references = loadProductImage
+        ? (
+            await Promise.all(
+              candidates.slice(0, REFERENCE_PHOTOS).map(async (hit) => {
+                const path = hit.imagePath ?? products.get(hit.id)?.imagePaths[0];
+                const loaded = path ? await loadProductImage(path).catch(() => null) : null;
+                return loaded ? { productId: hit.id, image: loaded } : null;
+              }),
+            )
+          ).filter((reference) => reference !== null)
+        : [];
+      return { hits: known, candidates, references, ms: Date.now() - started };
+    } catch (error) {
+      const reason = error instanceof GeminiError ? `${error.kind}${error.status ? `_${error.status}` : ""}` : error instanceof Error ? error.message : String(error);
+      console.warn("Photo search failed; the model looks at the photo alone", { conversationId: conversation.id, error: reason });
+      return { hits: [], candidates: [], references: [], ms: Date.now() - started, error: reason };
+    }
+  };
+  const [semanticHits, image, photo] = await Promise.all([
     semanticQuery
       ? searchByMeaning(semanticQuery).catch((error: unknown) => {
           console.warn("Meaning search failed; keywords only", { conversationId: conversation.id, error: error instanceof Error ? error.message : String(error) });
           return [] as SemanticHit[];
         })
       : Promise.resolve([] as SemanticHit[]),
-    deps.agent && hasPhoto && deps.loadImage ? deps.loadImage(message.media!.objectPath).catch(() => null) : Promise.resolve(null),
+    imageLoad,
+    photoSearch ? findByPhoto(photoSearch) : Promise.resolve(null),
   ]);
   if (semanticQuery) {
     run.diagnostics = {
       ...run.diagnostics,
       semantic: { query: semanticQuery, ms: Date.now() - semanticStarted, hits: semanticHits.map((hit) => `${products.get(hit.id)?.name ?? hit.id} ${hit.similarity.toFixed(2)}`) },
+    };
+  }
+  if (photo) {
+    run.diagnostics = {
+      ...run.diagnostics,
+      photo: {
+        ms: photo.ms,
+        hits: photo.hits.map((hit) => `${products.get(hit.id)?.name ?? hit.id} ${hit.similarity.toFixed(2)}`),
+        ...(photo.references.length ? { compared: photo.references.length } : {}),
+        ...(photo.error ? { error: photo.error } : {}),
+      },
     };
   }
 
@@ -349,12 +454,26 @@ export async function processInboundMessage(message: InboundMessage, deps: Orche
   // the open order come next.
   // Every item in the open order keeps a ref (order.items replaces the whole cart, so an item without one would be lost).
   const orderIds = [...new Set((orderState.draft?.lines ?? []).map((line) => line.productId))].filter((id) => products.has(id));
-  const ordered = [...new Set([...(conversation.activeProductId ? [conversation.activeProductId] : []), ...orderIds, ...shownProductIds(rows).reverse()])].filter((id) => products.has(id));
+  // Cards (with or without a photo) the customer got in the last two replies: listed, and marked so the model
+  // doesn't send the same card again unasked.
+  const recentCards = recentCardProductIds(rows, new Map(catalog.map((product) => [product.name, product.id])));
+  const ordered = [
+    ...new Set([...(conversation.activeProductId ? [conversation.activeProductId] : []), ...orderIds, ...recentCards, ...shownProductIds(rows).reverse()]),
+  ].filter((id) => products.has(id));
   const shownIds = ordered.slice(0, Math.max(6, orderIds.length + 1));
-  const shownLines = shownIds.map((id) => productLine(refFor(refs, products.get(id)!), products.get(id)!));
+  const shownLines = shownIds.map((id) => `${productLine(refFor(refs, products.get(id)!), products.get(id)!)}${recentCards.has(id) ? " — card just sent" : ""}`);
+  // What the customer's photo looks like: this message is about them, so they come right after the shown items.
+  const photoItems = (photo?.candidates ?? []).map((hit) => products.get(hit.id)!);
+  const photoLines = photoItems.map((product) => productLine(refFor(refs, product), product));
+  const referencePhotos = image ? (photo?.references ?? []).map((reference) => ({ ref: refFor(refs, products.get(reference.productId)!), image: reference.image })) : [];
   const matchLines = search?.matches.map((hit) => productLine(refFor(refs, hit.product), hit.product, hit)) ?? [];
   const alternativeLines = search?.alternatives.map((hit) => productLine(refFor(refs, hit.product), hit.product, hit)) ?? [];
-  const alreadyListed = new Set([...shownIds, ...(search?.matches ?? []).map((hit) => hit.product.id), ...(search?.alternatives ?? []).map((hit) => hit.product.id)]);
+  const alreadyListed = new Set([
+    ...shownIds,
+    ...photoItems.map((product) => product.id),
+    ...(search?.matches ?? []).map((hit) => hit.product.id),
+    ...(search?.alternatives ?? []).map((hit) => hit.product.id),
+  ]);
   const semanticItems = semanticHits
     .map((hit) => products.get(hit.id))
     .filter((product): product is CatalogItem => product !== undefined && !alreadyListed.has(product.id))
@@ -368,6 +487,7 @@ export async function processInboundMessage(message: InboundMessage, deps: Orche
     const notes: string[] = [];
     if (ingested.firstContact) notes.push("This is the customer's very first message: briefly mention you're the shop's automated assistant and that they can ask for a person anytime.");
     if (wantsHuman && !handoffPending) notes.push("The customer is asking for a person or a call. The team is being notified automatically: set handoff.requested=true, acknowledge it naturally, and still answer anything else they asked.");
+    if (late) notes.push(`They sent this ${describeWait(waitedMs)} ago and are only now getting an answer (the assistant was offline): start your first message with a short apology for the late reply, in their language.`);
     const stateNote = handoffPending
       ? "The team was already notified that this customer wants a person; nobody has replied yet. Keep helping and reassure them; do not request again."
       : "You are answering this customer.";
@@ -393,6 +513,8 @@ export async function processInboundMessage(message: InboundMessage, deps: Orche
       matchLines,
       alternativeLines,
       semanticLines,
+      photoLines,
+      photoRefs: referencePhotos.map((reference) => reference.ref),
       orderSection: ordersOn ? orderContext({ state: orderState, refs, products, pricing, whatsappPhone }) : undefined,
       shop,
       message: text,
@@ -411,6 +533,7 @@ export async function processInboundMessage(message: InboundMessage, deps: Orche
         shop,
         contextText,
         image,
+        referencePhotos,
         catalog,
         refs,
         products,
@@ -421,6 +544,8 @@ export async function processInboundMessage(message: InboundMessage, deps: Orche
         semanticSearch: embeddings
           ? async (query) => (await searchByMeaning(query)).map((hit) => products.get(hit.id)).filter((product): product is CatalogItem => product !== undefined)
           : undefined,
+        recentCards,
+        customerText: text,
         onAttempt: (attempt) => void attempts.push(`${attempt.model} ${attempt.outcome} ${attempt.ms}ms`),
         fetchImpl: deps.agent.fetchImpl,
       });
@@ -461,6 +586,8 @@ export async function processInboundMessage(message: InboundMessage, deps: Orche
     const focusRef = shownIds.length ? refFor(refs, products.get(shownIds[0]!)!) : undefined;
     const similar = confidentHit(semanticHits);
     const similarProduct = similar ? products.get(similar.id) : undefined;
+    const photoMatch = confidentPhotoHit(photo?.hits ?? []);
+    const photoProduct = photoMatch ? products.get(photoMatch.id) : undefined;
     const draft = fallbackDraft({
       text,
       language,
@@ -475,8 +602,10 @@ export async function processInboundMessage(message: InboundMessage, deps: Orche
       refs,
       focusRef,
       similarRef: similarProduct ? refFor(refs, similarProduct) : undefined,
+      photoRef: photoProduct ? refFor(refs, photoProduct) : undefined,
+      late,
     });
-    composed = composeReply({ draft, chatId: message.chatId, refs, products, publicUrl }, { sanitize: true });
+    composed = composeReply({ draft, chatId: message.chatId, refs, products, publicUrl, recentCards, customerText: text }, { sanitize: true });
     run.outcome = "fallback";
   }
 

@@ -42,6 +42,8 @@ export type ProcessorOptions = {
   maxMergeWaitMs?: number;
   // Typing pause between consecutive messages to the same chat.
   sendPauseMs?: number;
+  // Gap between follow-ups to different chats.
+  scheduledGapMs?: number;
   // When set (e.g. "https://xyz.supabase.co"), product photos must come from exactly this origin.
   mediaOrigin?: string;
   sleep?: Sleep;
@@ -75,6 +77,7 @@ export class MessageProcessor {
   private readonly mergeWindowMs: number;
   private readonly maxMergeWaitMs: number;
   private readonly sendPauseMs: number;
+  private readonly scheduledGapMs: number;
   private readonly mediaOrigin: string | undefined;
   private readonly sleep: Sleep;
   private readonly logger: ProcessorLogger;
@@ -91,6 +94,7 @@ export class MessageProcessor {
     this.mergeWindowMs = options.mergeWindowMs ?? 2_500;
     this.maxMergeWaitMs = options.maxMergeWaitMs ?? 6_000;
     this.sendPauseMs = options.sendPauseMs ?? 900;
+    this.scheduledGapMs = options.scheduledGapMs ?? 4_000;
     this.mediaOrigin = options.mediaOrigin?.replace(/\/$/, "") || undefined;
     this.sleep = options.sleep ?? defaultSleep;
     this.logger = options.logger ?? silentLogger;
@@ -184,17 +188,73 @@ export class MessageProcessor {
     this.pendingBatches.delete(chatId);
     clearTimeout(batch.timer);
 
-    // One queue per chat keeps a customer's turns in order; different chats run concurrently.
-    const previous = this.chatQueues.get(chatId) ?? Promise.resolve();
-    const current = previous
-      .catch(() => undefined)
-      .then(() => this.process(batch.messages))
+    void this.inChatQueue(chatId, () => this.process(batch.messages))
       .catch((error: unknown) => this.logger.error({ chatId: redact(chatId), error: describe(error) }, "Message processing failed"))
+      .then(batch.settle);
+  }
+
+  // One queue per chat keeps its turns (and follow-ups) in order; different chats run concurrently.
+  private inChatQueue<T>(chatId: string, task: () => Promise<T>): Promise<T> {
+    const previous = this.chatQueues.get(chatId) ?? Promise.resolve();
+    const result = previous.catch(() => undefined).then(task);
+    const settled: Promise<void> = result
+      .then(
+        () => undefined,
+        () => undefined,
+      )
       .finally(() => {
-        if (this.chatQueues.get(chatId) === current) this.chatQueues.delete(chatId);
+        if (this.chatQueues.get(chatId) === settled) this.chatQueues.delete(chatId);
       });
-    this.chatQueues.set(chatId, current);
-    void current.then(batch.settle);
+    this.chatQueues.set(chatId, settled);
+    return result;
+  }
+
+  // Follow-ups the brain sends without a customer message first (order reminders, notes to the owner). Chats are
+  // taken one at a time with a gap, because several chats getting a message in the same second looks automated.
+  async sendScheduled(actions: readonly OutboundAction[]): Promise<void> {
+    const byChat = new Map<string, OutboundAction[]>();
+    for (const action of actions) byChat.set(action.recipientChatId, [...(byChat.get(action.recipientChatId) ?? []), action]);
+
+    const acknowledgements: DeliveryAcknowledgement[] = [];
+    let first = true;
+    for (const [chatId, chatActions] of byChat) {
+      if (!first) await this.sleep(this.scheduledGapMs);
+      first = false;
+      // The owner is talking to this customer: an automated reminder would land in their conversation.
+      if (this.ownerActive(chatId)) {
+        acknowledgements.push(...chatActions.map((action): DeliveryAcknowledgement => ({ actionId: action.actionId, status: "failed", errorCode: "owner_active" })));
+        continue;
+      }
+      // The customer is writing or being answered right now (maybe "confirm"): a reminder decided before their
+      // message would contradict the reply ("order placed" followed by "your order isn't placed yet").
+      if (this.pendingBatches.has(chatId) || this.chatQueues.has(chatId)) {
+        acknowledgements.push(...chatActions.map((action): DeliveryAcknowledgement => ({ actionId: action.actionId, status: "failed", errorCode: "customer_active" })));
+        continue;
+      }
+      const sent = await this.inChatQueue(chatId, async () => {
+        const typing = this.startTyping(chatId);
+        try {
+          await this.sleep(this.sendPauseMs);
+          return await this.deliver(chatActions, typing);
+        } finally {
+          await typing.stop();
+        }
+      }).catch((error: unknown) => {
+        this.logger.error({ chatId: redact(chatId), error: describe(error) }, "Follow-up send failed");
+        return chatActions.map((action): DeliveryAcknowledgement => ({ actionId: action.actionId, status: "failed", errorCode: "send_failed" }));
+      });
+      acknowledgements.push(...sent);
+    }
+
+    // A delivery report takes at most 8 acknowledgements.
+    for (let index = 0; index < acknowledgements.length; index += 8) {
+      const chunk = acknowledgements.slice(index, index + 8);
+      try {
+        await withRetry(() => this.brainClient.reportDeliveries(chunk), this.brainRetryDelaysMs, this.sleep);
+      } catch (error) {
+        this.logger.warn({ error: describe(error) }, "Follow-up delivery report failed");
+      }
+    }
   }
 
   private async process(batch: readonly TransportMessage[]): Promise<void> {

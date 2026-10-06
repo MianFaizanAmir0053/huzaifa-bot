@@ -1,16 +1,20 @@
 import {
   BrainResponseSchema,
   DeliveryReportSchema,
+  FollowUpResponseSchema,
   MediaUploadGrantSchema,
+  OutboundActionSchema,
   OwnerMessageResultSchema,
   OwnerMessageSchema,
   type DeliveryAcknowledgement,
+  type FollowUpResponse,
   type InboundMessage,
   type MediaUploadGrant,
   type MediaUploadRequest,
   type OwnerMessage,
   type OwnerMessageResult,
 } from "@huzaifa/contracts";
+import { z } from "zod";
 import { BrainRequestError } from "./retry.js";
 import { createGatewaySignature } from "./signature.js";
 
@@ -41,6 +45,18 @@ export class BrainClient {
   async reportDeliveries(acknowledgements: DeliveryAcknowledgement[]): Promise<void> {
     const report = DeliveryReportSchema.parse({ acknowledgements });
     await this.signedRequest("/api/gateway/deliveries", report);
+  }
+
+  // Follow-ups that are due now (order reminders, notes to the owner), already claimed by the brain. Checked one
+  // by one: a single malformed action must not cost the round's other claimed follow-ups.
+  async fetchFollowUps(): Promise<FollowUpResponse & { invalid: number }> {
+    const response = await this.signedRequest("/api/gateway/followups", { requestedAt: new Date().toISOString() });
+    const { actions } = FollowUpResponseSchema.extend({ actions: z.array(z.unknown()).max(20) }).parse(await response.json());
+    const valid = actions.flatMap((action) => {
+      const parsed = OutboundActionSchema.safeParse(action);
+      return parsed.success ? [parsed.data] : [];
+    });
+    return { actions: valid, invalid: actions.length - valid.length };
   }
 
   // The owner typed in a customer chat; the brain records it and pauses the bot there.

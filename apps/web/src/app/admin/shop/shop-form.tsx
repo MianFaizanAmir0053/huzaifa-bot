@@ -16,6 +16,7 @@ const DAYS = [
 ] as const;
 
 const hours = Array.from({ length: 25 }, (_, hour) => hour);
+const REMINDER_OPTIONS = [30, 60, 120, 240];
 const hourLabel = (hour: number) => (hour === 24 ? "midnight" : `${hour % 12 === 0 ? 12 : hour % 12}${hour < 12 ? "am" : "pm"}`);
 
 export function ShopForm({ settings, action }: { settings: ShopSettings; action: (state: ActionState, formData: FormData) => Promise<ActionState> }) {
@@ -117,7 +118,28 @@ export function ShopForm({ settings, action }: { settings: ShopSettings; action:
             Free delivery from (Rs, optional)
             <input name="freeDeliveryFromPkr" inputMode="numeric" defaultValue={settings.freeDeliveryFromPkr ?? ""} placeholder="e.g. 5000" />
           </label>
+          <label>
+            Remind a customer who didn&apos;t confirm
+            <select name="cartReminderMinutes" defaultValue={settings.cartReminderMinutes ?? ""}>
+              <option value="">Never</option>
+              {[...new Set([...REMINDER_OPTIONS, ...(settings.cartReminderMinutes ? [settings.cartReminderMinutes] : [])])]
+                .sort((a, b) => a - b)
+                .map((minutes) => (
+                  <option key={minutes} value={minutes}>
+                    {minutes % 60 === 0 ? `After ${minutes / 60} hour${minutes === 60 ? "" : "s"}` : `After ${minutes} minutes`}
+                  </option>
+                ))}
+            </select>
+          </label>
         </div>
+        <label className="check">
+          <input type="checkbox" name="ownerFollowUps" defaultChecked={settings.ownerFollowUps} /> Message me about carts that went quiet and orders waiting
+          for my confirmation
+        </label>
+        <p className="muted small">
+          A customer gets one short reminder per summary, only during opening hours (never at night) and within a day of their last message.
+          Needs the database migration 202610060001_order_followups.sql.
+        </p>
       </section>
 
       <section className="panel">

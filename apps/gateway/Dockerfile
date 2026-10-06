@@ -5,6 +5,8 @@ ENV PUPPETEER_SKIP_DOWNLOAD=true \
     PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# Fixes applied to dependencies on install (whatsapp-web.js: WhatsApp Web renamed message ids in July 2026).
+COPY patches patches
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY apps/gateway/package.json apps/gateway/package.json
 RUN pnpm install --frozen-lockfile --filter @huzaifa/gateway...

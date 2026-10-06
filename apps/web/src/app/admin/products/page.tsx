@@ -6,6 +6,8 @@ import { rebuildSearchIndex } from "./actions";
 import { requireAdmin } from "@/auth/admin";
 import { PRODUCT_STATUSES, listAdminProducts, type ProductStatus } from "@/catalog/admin/queries";
 import { searchIndexStatus } from "@/catalog/embeddings";
+import { photoIndexStatus } from "@/catalog/image-embeddings";
+import { getVisionEnvironment } from "@/config/env";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
 
 const pkr = new Intl.NumberFormat("en-PK", { style: "currency", currency: "PKR", maximumFractionDigits: 0 });
@@ -15,11 +17,14 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
   const params = await searchParams;
   const query = typeof params.q === "string" ? params.q : "";
   const status = PRODUCT_STATUSES.includes(params.status as ProductStatus) ? (params.status as ProductStatus) : undefined;
-  const [products, index] = await Promise.all([
+  // Service role after requireAdmin: only counts and hashes are read.
+  const service = createSupabaseServiceClient();
+  const [products, index, photos] = await Promise.all([
     listAdminProducts({ query, status }),
-    // Service role after requireAdmin: only counts are read.
-    searchIndexStatus(createSupabaseServiceClient()).catch(() => null),
+    searchIndexStatus(service).catch(() => null),
+    photoIndexStatus(service, getVisionEnvironment().imageEmbeddingModel).catch(() => null),
   ]);
+  const photosBehind = Boolean(photos?.available && photos.indexed < photos.total);
 
   return (
     <main className="admin-main">
@@ -37,7 +42,16 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
                 {index.indexed} of {index.total} live products can be found by meaning, so words like &quot;chadar&quot; or &quot;burqa&quot; find
                 the right item even if they aren&apos;t in its name. Products update on their own when you edit them.
               </p>
-              {index.indexed < index.total ? (
+              {photos ? (
+                <p className="muted">
+                  {!photos.available
+                    ? "Photo matching is off until the database migration 202610060002_product_image_embeddings.sql is applied in Supabase."
+                    : photos.total
+                      ? `${photos.indexed} of ${photos.total} product photos can be matched when a customer sends a picture, such as a screenshot of your post. New photos are added on their own.`
+                      : "Photo matching starts on its own once live products have photos."}
+                </p>
+              ) : null}
+              {index.indexed < index.total || photosBehind ? (
                 <ActionButton action={rebuildSearchIndex} label="Update search index" pendingLabel="Updating… (up to a minute)" variant="secondary" />
               ) : null}
             </>

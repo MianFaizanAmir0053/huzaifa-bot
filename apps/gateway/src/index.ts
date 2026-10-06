@@ -1,5 +1,6 @@
 import { BrainClient } from "./brain-client.js";
 import { getGatewayEnvironment } from "./config.js";
+import { startFollowUps } from "./followups.js";
 import { MessageProcessor } from "./processor.js";
 import { buildServer } from "./server.js";
 import { WhatsAppWebTransport } from "./whatsapp-web.js";
@@ -22,6 +23,7 @@ const transport = new WhatsAppWebTransport(
   { info: (d, m) => log.info(d, m), warn: (d, m) => log.warn(d, m), error: (d, m) => log.error(d, m) },
   environment.PUPPETEER_EXECUTABLE_PATH,
   environment.WHATSAPP_USER_AGENT,
+  { ignoreSavedContacts: environment.IGNORE_SAVED_CONTACTS },
 );
 const server = buildServer(transport, environment.GATEWAY_ADMIN_TOKEN);
 log = {
@@ -38,11 +40,15 @@ const processor = new MessageProcessor(transport, brainClient, {
 transport.onMessage((message) => processor.enqueue(message));
 // The owner typing in a customer chat makes the brain pause the bot there (handoff).
 transport.onOwnerMessage((message) => processor.reportOwnerMessage(message));
+// Order reminders and notes to the owner, asked for every few minutes.
+const followUps =
+  environment.FOLLOWUP_INTERVAL_MS > 0 ? startFollowUps({ intervalMs: environment.FOLLOWUP_INTERVAL_MS, transport, brainClient, processor, logger: log }) : undefined;
 
 let stopping = false;
 const shutdown = async (signal: string) => {
   if (stopping) return;
   stopping = true;
+  followUps?.stop();
   server.log.info({ signal }, "Shutting down");
   // Stop accepting HTTP, let queued chats finish (bounded), then close the browser so the session files are flushed.
   await server.close().catch(() => undefined);
@@ -52,6 +58,9 @@ const shutdown = async (signal: string) => {
 };
 process.once("SIGINT", () => void shutdown("SIGINT"));
 process.once("SIGTERM", () => void shutdown("SIGTERM"));
+// Library timers (whatsapp-web.js's takeover, Puppeteer) can reject with nobody listening once the page is gone.
+// That must not take the whole gateway down: the watchdog restarts the browser.
+process.on("unhandledRejection", (reason) => log.error({ error: reason instanceof Error ? reason.message : String(reason) }, "Unhandled rejection"));
 
 await server.listen({ port: environment.PORT, host: environment.HOST });
 void transport.initialize().catch((error: unknown) => server.log.error(error, "WhatsApp initialization failed; retrying"));

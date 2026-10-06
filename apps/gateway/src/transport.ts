@@ -19,7 +19,26 @@ export type TransportMessage = {
 
 export type SessionState = "starting" | "qr_pending" | "authenticated" | "ready" | "disconnected" | "error";
 
-export type SessionSnapshot = {
+// How the running session is doing. All optional: consumers must keep working with gateways that predate them.
+export type SessionHealth = {
+  // Last message WhatsApp delivered live from a one-to-one chat (recovered ones don't count): proof messages flow.
+  lastInboundAt?: string;
+  // Last check that the browser session still answers, and its outcome (absent until the first check).
+  lastHealthCheckAt?: string;
+  healthy?: boolean;
+  // Customer messages WhatsApp never reported live that a catch-up handed over, since the gateway started.
+  recoveredMessages?: number;
+  // The latest restart the gateway did on its own, and why.
+  lastAutoRestartAt?: string;
+  lastAutoRestartReason?: string;
+  // Messages from contacts saved in the phone that were left alone; only present while that filter is on.
+  ignoredSavedContacts?: number;
+  // False while the chat list can't be read, so missed messages can't be found (e.g. whatsapp-web.js out of step
+  // with WhatsApp Web); absent until the first look.
+  missedMessageCheck?: boolean;
+};
+
+export type SessionSnapshot = SessionHealth & {
   state: SessionState;
   qrDataUrl?: string;
   detail?: string;

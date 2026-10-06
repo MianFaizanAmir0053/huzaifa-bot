@@ -15,7 +15,7 @@ import type { StoredMessage } from "../src/agent/memory";
 import { processInboundMessage } from "../src/agent/orchestrator";
 import type { AgentRunRecord, BrainRepository, IngestResult, SavedOrderDraft } from "../src/catalog/repository";
 import type { CatalogItem } from "../src/catalog/search";
-import { cosineSimilarity, DEFAULT_EMBEDDING_MODEL, embeddingSourceHash, productEmbeddingText, type SemanticHit } from "../src/catalog/semantic";
+import { cosineSimilarity, DEFAULT_EMBEDDING_MODEL, embeddingSourceHash, productEmbeddingText, type PhotoHit, type SemanticHit } from "../src/catalog/semantic";
 import { EMPTY_DETAILS, orderFingerprint, type OrderDraft, type OrderState } from "../src/orders/cart";
 import { EVAL_CASES, EVAL_CATALOG, EVAL_SHOP, ROBOTIC, type EvalCase } from "./cases";
 
@@ -84,6 +84,10 @@ class EvalRepository implements BrainRepository {
       .filter((hit) => hit.similarity >= minSimilarity)
       .sort((a, b) => b.similarity - a.similarity)
       .slice(0, count);
+  }
+  // The eval catalog has no real photos (and eval messages are text), so photo search never finds anything.
+  async matchProductImages(): Promise<PhotoHit[]> {
+    return [];
   }
   async ingestInbound(): Promise<IngestResult> {
     const history = this.testCase.history ?? [];

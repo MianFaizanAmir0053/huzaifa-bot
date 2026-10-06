@@ -17,25 +17,47 @@ import {
 } from "@/catalog/admin/validation";
 import { refreshSearchIndexLater } from "@/catalog/admin/search-index";
 import { refreshProductEmbeddings } from "@/catalog/embeddings";
+import { refreshProductImageEmbeddings } from "@/catalog/image-embeddings";
 import { getVisionEnvironment } from "@/config/env";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
 
 export type ActionState = { error?: string; message?: string };
 
-// Products page button: embed every active product whose text changed (or that was never embedded).
+// Products page button: embed every active product whose text changed (or that was never embedded), and every
+// product photo not yet embedded with the current photo model.
 export async function rebuildSearchIndex(): Promise<ActionState> {
   await requireAdmin();
-  const { geminiKeys, embeddingModel } = getVisionEnvironment();
+  const { geminiKeys, embeddingModel, imageEmbeddingModel } = getVisionEnvironment();
   if (!geminiKeys.length) return { error: "Meaning search needs GEMINI_API_KEY in the server environment." };
   try {
-    const result = await refreshProductEmbeddings(createSupabaseServiceClient(), { apiKey: geminiKeys, model: embeddingModel, budgetMs: 45_000 });
+    const client = createSupabaseServiceClient();
+    // Side by side (different models, separate quotas); a photo failure still reports the text index.
+    const [result, photos] = await Promise.all([
+      refreshProductEmbeddings(client, { apiKey: geminiKeys, model: embeddingModel, budgetMs: 45_000 }),
+      // Shorter: a batch of photos started just before the deadline can still take ~25 s.
+      refreshProductImageEmbeddings(client, { apiKey: geminiKeys, model: imageEmbeddingModel, budgetMs: 30_000 }).catch((error: unknown) => {
+        console.error("Photo index rebuild failed", error);
+        return null;
+      }),
+    ]);
     if (!result.available) return { error: "The database doesn't have meaning search yet. Apply migration 202609290004_product_embeddings.sql first." };
     revalidatePath("/admin/products");
     const parts = [`${result.updated} updated`, `${result.unchanged} already up to date`];
     if (result.failed) parts.push(`${result.failed} failed (try again)`);
     if (result.remaining) parts.push(`${result.remaining} left — press again to continue`);
-    return result.failed ? { error: `Search index: ${parts.join(", ")}.` } : { message: `Search index: ${parts.join(", ")}.` };
+    const photoParts = !photos
+      ? ["could not be updated (try again)"]
+      : !photos.available
+        ? ["off until migration 202610060002_product_image_embeddings.sql is applied"]
+        : [
+            `${photos.updated} added`,
+            `${photos.unchanged} already up to date`,
+            ...(photos.failed ? [`${photos.failed} failed (try again)`] : []),
+            ...(photos.remaining ? [`${photos.remaining} left — press again to continue`] : []),
+          ];
+    const summary = `Search index: ${parts.join(", ")}. Photos: ${photoParts.join(", ")}.`;
+    return result.failed || !photos || photos.failed ? { error: summary } : { message: summary };
   } catch (error) {
     console.error("Search index rebuild failed", error);
     return { error: "Could not update the search index. Try again." };

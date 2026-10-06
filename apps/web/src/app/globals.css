@@ -169,7 +169,7 @@ footer { display: flex; justify-content: space-between; padding: 32px 0 6px; col
 .admin-main { padding: 24px 16px; max-width: 1100px; margin: 0 auto; }
 
 /* Admin catalog */
-.admin-nav { display: flex; align-items: center; gap: 18px; font-size: 14px; }
+.admin-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; font-size: 14px; min-width: 0; }
 .admin-nav a { color: var(--muted); text-decoration: none; }
 .admin-nav a:hover { color: var(--ink); }
 .admin-main h1 { margin: 0; font-family: Georgia, serif; font-weight: 500; font-size: 28px; overflow-wrap: anywhere; }
@@ -348,6 +348,21 @@ footer { display: flex; justify-content: space-between; padding: 32px 0 6px; col
 .cancel-order { margin-top: 18px; }
 .cancel-order summary { cursor: pointer; font-size: 14px; color: var(--muted); }
 .index-panel h2 { display: flex; align-items: center; gap: 6px; }
+/* Admin home: tiles answer "what needs me now", the checklist "what's still missing". */
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-bottom: 8px; }
+.stat-tile { display: grid; gap: 4px; align-content: start; padding: 14px; background: var(--paper); border: 1px solid var(--line); color: var(--ink); text-decoration: none; }
+a.stat-tile:hover { border-color: var(--muted); }
+.stat-tile.attention { border-left: 3px solid var(--amber); }
+.stat-label { color: var(--muted); font-size: 13px; }
+.stat-value { font-size: 28px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.stat-note { color: var(--muted); font-size: 12px; }
+.checklist { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.checklist li { display: grid; grid-template-columns: 18px 1fr auto; gap: 10px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
+.checklist li:first-child { border-top: 0; }
+.checklist li > span:not(:last-child) { display: grid; gap: 2px; min-width: 0; }
+.checklist li.done svg { color: var(--green); }
+.checklist li.todo svg { color: var(--amber); }
+.checklist .button-link { padding: 6px 10px; font-size: 13px; white-space: nowrap; }
 @media (max-width: 640px) {
 	.order-items { font-size: 13px; }
 	.order-items th, .order-items td { padding: 6px 4px; }

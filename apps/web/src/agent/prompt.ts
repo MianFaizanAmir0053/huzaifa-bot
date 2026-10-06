@@ -4,7 +4,7 @@ import { flattenUntrusted } from "./memory";
 import { inStockSizes, type CatalogItem, type CatalogOverview, type SearchHit, type SearchResult } from "../catalog/search";
 import type { ShopSettings, ShopStatus } from "../shop/settings";
 
-export const AGENT_PROMPT_VERSION = "agent-v5";
+export const AGENT_PROMPT_VERSION = "agent-v6";
 
 // Used until the owner pastes real chats in /admin/shop. Shows the voice, not the facts.
 const DEFAULT_EXAMPLES = `Customer: Salam bhai
@@ -56,6 +56,8 @@ VOICE
 - At most one emoji, and only when the customer is casual.
 - Answer every part of the message (e.g. both "who are you?" and "call me").
 - Don't repeat sentences you already sent in this chat; vary your wording.
+- Don't send a product's card again when PRODUCT DATA says "card just sent": name it with its tag instead, unless they ask for its photo or price again.
+- When they turn an item down ("nahi chahiye", "koi aur?"), stop offering it. Ask what they'd prefer (colour, style, budget), or offer that the team tells them when something like it comes in (handoff, with what they want as the reason).
 - Greetings and small talk: greet back warmly, ask what they're looking for. Don't list products unless they ask.
 - Only greet back ("Walaikum assalam") if they greeted you in this message.
 - Never dead-end: if nothing matches, say so plainly, suggest the closest items, and ask one helpful question (colour, size, budget or occasion).
@@ -80,6 +82,13 @@ TOOLS (only when PRODUCT DATA isn't enough)
 - browse_catalog: optional category, for "what do you have?"
 To use tools, fill tool_calls and leave messages and show_products empty; you'll get TOOL RESULTS and then reply. Fill unused tool fields with "" or 0.
 - "Similar in meaning" items are guesses for words the keyword search didn't know: show them only if they really are what the customer means, and say it's the closest you have.
+
+PHOTOS
+- A customer's photo is often a screenshot of the shop's own post. PRODUCT DATA may then list items that look like it (by image similarity, best first), with their shop photos attached after the customer's photo. These are guesses: compare the photos yourself.
+- Clearly the same item (same design, colour and pattern): show it and tell them this is the one.
+- Only similar: say you don't have that exact one, and show the closest as an option.
+- Never say it's the same item unless it clearly looks the same. If you can't tell, show it and ask whether this is the one.
+- If none of them looks like their photo, ignore them and search_products for what you see (item, colour).
 
 ${options.ordersEnabled ? ORDERS_ON : ORDERS_OFF}
 
@@ -198,6 +207,10 @@ export type TurnContext = {
   alternativeLines: string[];
   // Products found by meaning for words the keyword search didn't know.
   semanticLines?: string[];
+  // Products whose photos look like the customer's photo (image similarity, best first).
+  photoLines?: string[];
+  // Refs whose shop photo is attached after the customer's photo.
+  photoRefs?: string[];
   // ORDER section (orders/cart.ts orderContext); omitted when the bot can't take orders.
   orderSection?: string;
   shop: ShopSettings;
@@ -226,6 +239,13 @@ function shopInfo(shop: ShopSettings): string {
   return rows.length ? rows.map(([label, value]) => `${label}: ${value}`).join("\n") : "(nothing filled in yet — a team member confirms policies)";
 }
 
+function photoNote(context: TurnContext): string {
+  if (!context.hasPhoto) return "";
+  const refs = context.photoRefs ?? [];
+  if (!refs.length) return "\nThe customer also sent the attached photo. Describe what you see only to find similar products.";
+  return `\nThe customer also sent a photo (the first image). The shop photos after it show ${refs.map((ref) => `[${ref}]`).join(", ")}, to compare with it.`;
+}
+
 export function buildTurnContext(context: TurnContext): string {
   const { status } = context;
   const statusLine = status.open
@@ -243,6 +263,7 @@ export function buildTurnContext(context: TurnContext): string {
       `Catalog: ${context.overview.totalProducts} items in stock; categories: ${context.overview.categories.map((entry) => `${entry.name} (${entry.count})`).join(", ") || "none yet"}`,
       context.overviewLines.length ? `Newest:\n${context.overviewLines.join("\n")}` : "",
       context.shownLines.length ? `Already shown in this chat:\n${context.shownLines.join("\n")}` : "",
+      context.photoLines?.length ? `Looks like the customer's photo (image similarity, best first — guesses: compare before saying it's the same):\n${context.photoLines.join("\n")}` : "",
       `Search for the new message (${context.searchLabel}):`,
       context.matchLines.length ? `Matches:\n${context.matchLines.join("\n")}` : "Matches: none",
       context.alternativeLines.length ? `Closest alternatives:\n${context.alternativeLines.join("\n")}` : "",
@@ -252,7 +273,7 @@ export function buildTurnContext(context: TurnContext): string {
       .join("\n"),
     context.orderSection ? `ORDER\n${context.orderSection}` : "",
     `SHOP INFO\n${shopInfo(context.shop)}`,
-    `CUSTOMER'S NEW MESSAGE:\n<customer_message>\n${flattenUntrusted(context.message) || "(no text)"}\n</customer_message>${context.hasPhoto ? "\nThe customer also sent the attached photo. Describe what you see only to find similar products." : ""}`,
+    `CUSTOMER'S NEW MESSAGE:\n<customer_message>\n${flattenUntrusted(context.message) || "(no text)"}\n</customer_message>${photoNote(context)}`,
     // Last, so it's the freshest instruction: models otherwise drift into the example chats' Roman Urdu.
     context.replyLanguage
       ? `REPLY LANGUAGE: ${LANGUAGE_NAMES[context.replyLanguage]}, like their message. Every message, including short phrases like "here you go".`

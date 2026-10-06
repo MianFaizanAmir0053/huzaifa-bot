@@ -10,6 +10,15 @@ const SessionSnapshotSchema = z.object({
   updatedAt: z.string().optional(),
   reconnectAttempts: z.number().optional(),
   pairingCode: z.string().max(20).optional(),
+  // Health of the running session; older gateways don't send these.
+  lastInboundAt: z.string().optional(),
+  lastHealthCheckAt: z.string().optional(),
+  healthy: z.boolean().optional(),
+  recoveredMessages: z.number().int().nonnegative().optional(),
+  lastAutoRestartAt: z.string().optional(),
+  lastAutoRestartReason: z.string().max(200).optional(),
+  ignoredSavedContacts: z.number().int().nonnegative().optional(),
+  missedMessageCheck: z.boolean().optional(),
 });
 export type GatewaySession = z.infer<typeof SessionSnapshotSchema>;
 

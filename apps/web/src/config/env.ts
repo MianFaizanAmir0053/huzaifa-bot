@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { parseGeminiKeys, parseModelList } from "../ai/gemini";
-import { DEFAULT_EMBEDDING_MODEL } from "../catalog/semantic";
+import { DEFAULT_EMBEDDING_MODEL, DEFAULT_IMAGE_EMBEDDING_MODEL } from "../catalog/semantic";
 
 const ServerEnvironmentSchema = z.object({
   NEXT_PUBLIC_SUPABASE_URL: z.url(),
@@ -52,6 +52,9 @@ export type VisionEnvironment = {
   fallbackModels: string[];
   // Meaning-based product search. Changing it means rebuilding the search index (Products page).
   embeddingModel: string;
+  // Photo search: a multimodal embedding model for customers' photos and the shop's product photos. Changing it
+  // also means rebuilding the search index.
+  imageEmbeddingModel: string;
 };
 
 export function getVisionEnvironment(): VisionEnvironment {
@@ -62,6 +65,7 @@ export function getVisionEnvironment(): VisionEnvironment {
     proModel: process.env.GEMINI_MODEL_PRO?.trim() || legacy || "gemini-flash-latest",
     fallbackModels: parseModelList(process.env.GEMINI_MODEL_FALLBACKS),
     embeddingModel: process.env.GEMINI_EMBEDDING_MODEL?.trim() || DEFAULT_EMBEDDING_MODEL,
+    imageEmbeddingModel: process.env.GEMINI_IMAGE_EMBEDDING_MODEL?.trim() || DEFAULT_IMAGE_EMBEDDING_MODEL,
   };
 }
 

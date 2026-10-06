@@ -94,6 +94,18 @@ export const OwnerMessageResultSchema = z.object({
 });
 export type OwnerMessageResult = z.infer<typeof OwnerMessageResultSchema>;
 
+// The gateway asks every few minutes for follow-ups that are due (order reminders, nudges to the owner).
+export const FollowUpRequestSchema = z.object({
+  requestedAt: z.string().datetime({ offset: true }),
+});
+export type FollowUpRequest = z.infer<typeof FollowUpRequestSchema>;
+
+export const FollowUpResponseSchema = z.object({
+  // A few customer reminders plus one owner digest and re-sent alerts; more waits for the next round.
+  actions: z.array(OutboundActionSchema).max(10),
+});
+export type FollowUpResponse = z.infer<typeof FollowUpResponseSchema>;
+
 export const DeliveryAcknowledgementSchema = z.object({
   actionId: z.uuid(),
   status: z.enum(["sent", "failed"]),

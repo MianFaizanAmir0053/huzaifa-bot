@@ -47,6 +47,9 @@ export type AgentInput = {
   shop: ShopSettings;
   contextText: string;
   image?: InboundImage | null;
+  // Shop photos of the products that look like the customer's photo, labelled with their refs so the model can
+  // compare them by eye.
+  referencePhotos?: readonly { ref: string; image: InboundImage }[];
   catalog: readonly CatalogItem[];
   // Shared with the context builder so the refs the model saw ("P1") resolve to the same products.
   refs: ProductRefs;
@@ -59,6 +62,10 @@ export type AgentInput = {
   orders?: { current: OrderDraft | null; pricing: DeliveryPricing; customerMessage: string };
   // Meaning-based search for the search_products tool when keywords find nothing.
   semanticSearch?: (text: string) => Promise<CatalogItem[]>;
+  // Products whose card went out in the last replies, and what the customer just wrote: a card is only sent
+  // again when they ask for it (compose.ts).
+  recentCards?: ReadonlySet<string>;
+  customerText?: string;
   onAttempt?: (attempt: GeminiAttempt) => void;
   fetchImpl?: typeof fetch;
 };
@@ -156,7 +163,14 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   const policyAmounts = amountsIn([shop.delivery, shop.payment, shop.returns, shop.otherFaq, String(shop.deliveryFeePkr ?? ""), String(shop.freeDeliveryFromPkr ?? "")].join(" "));
   const shopPlaceText = [shop.about, shop.address].join(" ");
   const firstParts: GeminiPart[] = [{ text: input.contextText }];
-  if (input.image) firstParts.push({ inline_data: { mime_type: input.image.mimeType, data: input.image.base64 } });
+  const photo = (image: InboundImage): GeminiPart => ({ inline_data: { mime_type: image.mimeType, data: image.base64 } });
+  if (input.image) {
+    const references = input.referencePhotos ?? [];
+    // Labelled, so the customer's photo can't be mistaken for one of the shop's.
+    if (references.length) firstParts.push({ text: "Customer's photo:" });
+    firstParts.push(photo(input.image));
+    for (const reference of references) firstParts.push({ text: `Shop photo of [${reference.ref}]:` }, photo(reference.image));
+  }
   const contents: GeminiTurn[] = [{ role: "user", parts: firstParts }];
 
   let calls = 0;
@@ -221,7 +235,6 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
 
     const draft = { language: output.language, messages: output.messages, showProducts: output.show_products };
     const order = checkOrder(input, output.order, output.messages);
-    // The customer's own address and phone digits may be read back in a sentence about the address or phone.
     // The customer's own address and phone digits may only be read back (never as a price or charge).
     const details = order.check?.next?.details;
     const phone = details?.phone ? `${details.phone} ${formatPhone(details.phone)}` : "";
@@ -234,6 +247,8 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
       allowedAmounts: policyAmounts,
       readBackNumbers: amountsIn(`${shopPlaceText} ${details?.address ?? ""} ${phone}`),
       exampleChats: shop.exampleChats || undefined,
+      recentCards: input.recentCards,
+      customerText: input.customerText,
     };
     const composed = composeReply(composeInput);
     const customer = { name: output.customer.name.trim() || undefined, city: output.customer.city.trim() || undefined };

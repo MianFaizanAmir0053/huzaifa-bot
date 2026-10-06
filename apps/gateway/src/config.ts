@@ -11,6 +11,15 @@ const GatewayEnvironmentSchema = z.object({
   WEBHOOK_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(45_000),
   // Quiet time before a customer's burst of messages is answered as one turn (never more than 6s overall).
   MERGE_WINDOW_MS: z.coerce.number().int().min(0).max(6_000).default(2_500),
+  // For a number that is also someone's personal WhatsApp: people saved in the phone's contacts are never
+  // answered by the bot, and nothing from their chats is stored.
+  IGNORE_SAVED_CONTACTS: z.stringbool().default(false),
+  // How often to ask the brain for due follow-ups (order reminders, notes to the owner). 0 turns them off.
+  FOLLOWUP_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .refine((value) => value === 0 || (value >= 60_000 && value <= 3_600_000), "Use 0 (off) or 60000–3600000")
+    .default(300_000),
   // Supabase project URL (e.g. https://xyz.supabase.co): product photos are only fetched from there.
   // Required: without it any https host with the right-looking path could be fetched from the gateway's network.
   PRODUCT_MEDIA_ORIGIN: z.url(),

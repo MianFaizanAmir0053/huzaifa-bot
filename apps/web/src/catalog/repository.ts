@@ -3,7 +3,7 @@ import type { InboundMessage, OutboundAction, OwnerMessage, OwnerMessageResult }
 import type { StoredMessage } from "../agent/memory";
 import { NO_ORDERS, type OrderDraft, type OrderState, type OrderStatus } from "../orders/cart";
 import type { CatalogItem } from "./search";
-import type { SemanticHit } from "./semantic";
+import type { PhotoHit, SemanticHit } from "./semantic";
 
 export type ConversationState = "bot_active" | "handoff_requested" | "human_active";
 
@@ -106,6 +106,11 @@ export interface BrainRepository {
   placeOrder(orderId: string, summaryFingerprint: string): Promise<number>;
   // Closest active products by meaning; [] until the embeddings migration is applied.
   matchProducts(embedding: readonly number[], count: number, minSimilarity: number): Promise<SemanticHit[]>;
+  // Active products whose photos look most like a photo's embedding (best photo each); [] until the photo search
+  // migration is applied.
+  matchProductImages(embedding: readonly number[], count: number, minSimilarity: number): Promise<PhotoHit[]>;
+  // False while match_product_images is known to be missing, so the customer's photo isn't embedded for nothing.
+  photoSearchReady?(): boolean;
 }
 
 type OrderRow = {
@@ -127,6 +132,8 @@ type OrderRow = {
 const RECENT_ORDER_DAYS = 60;
 // After match_products turns out to be missing, don't ask again for a while.
 let semanticUnavailableUntil = 0;
+// Same for match_product_images.
+let photoSearchUnavailableUntil = 0;
 
 type ProductRow = {
   id: string;
@@ -368,6 +375,32 @@ export class SupabaseBrainRepository implements BrainRepository {
       throw error;
     }
     return ((data ?? []) as { id: string; similarity: number | string }[]).map((row) => ({ id: row.id, similarity: Number(row.similarity) }));
+  }
+
+  photoSearchReady(): boolean {
+    return Date.now() >= photoSearchUnavailableUntil;
+  }
+
+  async matchProductImages(embedding: readonly number[], count: number, minSimilarity: number): Promise<PhotoHit[]> {
+    if (Date.now() < photoSearchUnavailableUntil) return [];
+    const { data, error } = await this.client.rpc("match_product_images", {
+      // pgvector reads its text form "[0.1,0.2,…]".
+      query_embedding: JSON.stringify(embedding),
+      match_count: count,
+      min_similarity: minSimilarity,
+    });
+    if (error) {
+      if (isMissingSchema(error)) {
+        photoSearchUnavailableUntil = Date.now() + 10 * 60_000;
+        return [];
+      }
+      throw error;
+    }
+    return ((data ?? []) as { product_id: string; storage_path: string | null; similarity: number | string }[]).map((row) => ({
+      id: row.product_id,
+      imagePath: row.storage_path ?? null,
+      similarity: Number(row.similarity),
+    }));
   }
 
   async loadRecentMessages(conversationId: string, limit: number): Promise<StoredMessage[]> {

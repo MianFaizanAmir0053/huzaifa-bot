@@ -109,9 +109,24 @@ function normalizeForCopyCheck(text: string): string {
   return text.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+function maskTags(sentence: string): string {
+  return sentence.replace(TAG, (_match, kind: string) => (kind.toLowerCase().startsWith("size") ? " ⟪size⟫ " : " ⟪item⟫ "));
+}
+
+// Keeps the clauses of a sentence that state a database fact (a tag) and pass `isClean`, without a dangling
+// "lekin"/"but" or comma. Untagged clauses go with the claim: "Ji haan, M size available hai." must not shrink
+// to a bare "Ji haan." when M is sold out.
+function cleanClauses(sentence: string, isClean: (clause: string) => boolean): string {
+  const clauses = sentence.split(CLAUSE_SPLIT).filter((clause) => /\{\{/.test(clause) && isClean(clause));
+  if (!clauses.length) return "";
+  const text = clauses.join(" ").replace(LEADING_JOINER, "").replace(/[\s,،;]+$/, "").trim();
+  const end = sentence.trim().match(/[.!?۔]$/)?.[0] ?? "";
+  return /[.!?۔]$/.test(text) ? text : `${text}${end}`;
+}
+
 function violations(sentence: string, allowed: ReadonlySet<string>, examples?: string, readBack: ReadonlySet<string> = new Set()): Violation[] {
   const hasProduct = /\{\{\s*product\s*:/i.test(sentence);
-  const masked = sentence.replace(TAG, (_match, kind: string) => (kind.toLowerCase().startsWith("size") ? " ⟪size⟫ " : " ⟪item⟫ "));
+  const masked = maskTags(sentence);
   const found: Violation[] = [];
   // A shop-published number is fine in a policy sentence, never in a sentence about a product.
   const policyAmounts = hasProduct || !POLICY_CONTEXT.test(masked) ? new Set<string>() : allowed;
@@ -134,6 +149,32 @@ const VIOLATION_MESSAGES: Record<Violation, string> = {
   tag: "wrote a broken tag; use exactly {{product:P1}} or {{size:P1:M}}",
   copied: "copied a line from the example chats; write your own words and never repeat other customers' details",
 };
+
+// Same reading as markSizes: single letters only in capitals, numbers only as "size 32" / "32 number".
+const UPPER_SIZE = /(?<![\p{L}\p{N}'’])(?:[2-5]XL|XXXL|XXL|XL|XXS|XS|S|M|L)(?![\p{L}\p{N}'’])/gu;
+const WORD_SIZE = /\bsize\s+(\d{1,2}|xxxl|xxl|xl|xs)\b|\b(\d{1,2}|xxxl|xxl|xl|xs)\s+(?:size|number)\b|\b(extra[\s-]*large|small|medium|large)\b/gi;
+const SIZE_WORDS: Record<string, string> = { "extra large": "XL", small: "S", medium: "M", large: "L" };
+
+// The rewrite fixes what it's told precisely: which size was claimed untagged, and the tag to write instead.
+function sizeViolationMessage(sentence: string, masked: string): string {
+  const ref = sentence.match(/\{\{\s*(?:product|sizes?)\s*:\s*([A-Za-z0-9]+)/i)?.[1]?.toUpperCase() ?? "P1";
+  const sizes = new Set<string>();
+  // Tagged sizes are masked already, so only the untagged ones are found here.
+  for (const match of masked.matchAll(UPPER_SIZE)) sizes.add(match[0]);
+  for (const match of masked.matchAll(WORD_SIZE)) {
+    const word = match[3]?.toLowerCase().replace(/[\s-]+/g, " ");
+    const size = match[1] ?? match[2] ?? (word ? SIZE_WORDS[word] : undefined);
+    if (size) sizes.add(size.toUpperCase());
+  }
+  if (!sizes.size) return VIOLATION_MESSAGES.size;
+  const tags = [...sizes].map((size) => `{{size:${ref}:${size}}}`).join(" and ");
+  return `stated availability of size ${[...sizes].join(", ")} without a tag: write ${tags} in its place (each becomes a whole clause, e.g. "XL size abhi khatam hai" or "XL size nahi aata"), never "${[...sizes][0]} nahi hai" or "available" yourself`;
+}
+
+// A sentence whose only problem is an untagged size claim keeps its clean clauses: "{{size:P1:L}}, lekin XL nahi
+// hai." still tells the customer L is in stock instead of losing the whole answer.
+const CLAUSE_SPLIT = /(?<=[,،;])\s*|\s+(?=(?:lekin|magar|but|however)\b)/i;
+const LEADING_JOINER = /^(?:lekin|magar|but|however|aur|and)\s+/i;
 
 export const MAX_MESSAGES = 3;
 const MAX_MESSAGE_CHARS = 700;
@@ -199,7 +240,19 @@ export type ComposeInput = {
   readBackNumbers?: ReadonlySet<string>;
   // The owner's pasted example chats: long lines copied from them are rejected (they hold real customers' words).
   exampleChats?: string;
+  // Products whose card went out in the bot's last replies (memory.ts recentCardProductIds). Sent again only when
+  // the customer asks for it (photo, price, details), so someone who said no isn't shown the same item every turn.
+  recentCards?: ReadonlySet<string>;
+  customerText?: string;
 };
+
+// The customer asks to see a product (again): its photo, price or details.
+const ASKS_TO_SEE =
+  /\b(?:pics?|pictures?|photos?|images?|tasveer\w*|tasweer\w*|dikha\w*|dekha\w*|show|send|bhej\w*|check|chk|price|prices|qeemat|keemat|kitne|kitna|kitni|rate|cost|details?|dobara|again|wapis|wapas)\b|تصویر|دکھا|قیمت|کتنے/iu;
+
+export function asksToSeeProduct(text: string): boolean {
+  return ASKS_TO_SEE.test(text);
+}
 
 export type ComposeResult = {
   actions: OutboundAction[];
@@ -239,8 +292,15 @@ function renderMessage(text: string, input: ComposeInput, issues: Set<string>, s
   for (const sentence of text.split(SENTENCE_SPLIT)) {
     const found = violations(sentence, allowed, examples, input.readBackNumbers);
     // Quoting the sentence tells the rewrite exactly what to fix.
-    for (const violation of found) issues.add(`${VIOLATION_MESSAGES[violation]} (in "${sentence.trim().slice(0, 90)}")`);
-    if (!(sanitize && found.length)) kept.push(sentence);
+    for (const violation of found) {
+      const message = violation === "size" ? sizeViolationMessage(sentence, maskTags(sentence)) : VIOLATION_MESSAGES[violation];
+      issues.add(`${message} (in "${sentence.trim().slice(0, 90)}")`);
+    }
+    if (!found.length || !sanitize) kept.push(sentence);
+    else if (found.every((violation) => violation === "size")) {
+      const clean = cleanClauses(sentence, (clause) => violations(clause, allowed, examples, input.readBackNumbers).length === 0);
+      if (clean) kept.push(clean);
+    }
   }
   const raw = kept.join(" ");
 
@@ -306,7 +366,7 @@ export function composeReply(input: ComposeInput, options: { sanitize?: boolean 
     })
     .filter(Boolean);
 
-  const cards: CatalogItem[] = [];
+  const wanted: CatalogItem[] = [];
   for (const ref of draft.showProducts) {
     const product = input.refs.byRef.get(ref.trim().toUpperCase());
     const fresh = product ? input.products.get(product.id) : undefined;
@@ -314,10 +374,18 @@ export function composeReply(input: ComposeInput, options: { sanitize?: boolean 
       issues.add(`unknown product ref ${ref} in show_products`);
       continue;
     }
-    if (!cards.some((card) => card.id === fresh.id) && cards.length < 3) cards.push(fresh);
+    if (!wanted.some((card) => card.id === fresh.id) && wanted.length < 3) wanted.push(fresh);
   }
+  // The same card again and again reads like a broken bot; it's sent again only when asked for. A reply that
+  // would be left with nothing at all keeps it.
+  const repeatAllowed = asksToSeeProduct(input.customerText ?? "");
+  const notRepeated = wanted.filter((card) => repeatAllowed || !input.recentCards?.has(card.id));
+  const cards = notRepeated.length || texts.length ? notRepeated : wanted;
+  let messages = texts;
+  // "ye dekhein 👇" with nothing below it: the arrow goes, the words stay.
+  if (wanted.length && !cards.length) messages = texts.map((message) => message.replace(/\s*👇/gu, "").trim()).filter(Boolean);
 
-  if (texts.length === 0 && cards.length === 0) issues.add("empty reply");
+  if (messages.length === 0 && cards.length === 0) issues.add("empty reply");
 
   const text = (value: string): OutboundAction => ({ actionId: randomUUID(), recipientChatId: input.chatId, type: "text", text: value });
   const cardActions: OutboundAction[] = [];
@@ -341,8 +409,8 @@ export function composeReply(input: ComposeInput, options: { sanitize?: boolean 
   if (withoutPhotos.length) cardActions.push(text(withoutPhotos.map((card) => productCaption(card, draft.language)).join("\n\n")));
 
   // Cards follow the message that points at them ("ye dekhein 👇"); without one, they follow the first message.
-  const pointer = texts.findIndex((message) => /👇|:$/u.test(message));
-  const split = pointer >= 0 ? pointer + 1 : Math.min(1, texts.length);
-  const actions = [...texts.slice(0, split).map(text), ...cardActions, ...texts.slice(split).map(text)];
+  const pointer = messages.findIndex((message) => /👇|:$/u.test(message));
+  const split = pointer >= 0 ? pointer + 1 : Math.min(1, messages.length);
+  const actions = [...messages.slice(0, split).map(text), ...cardActions, ...messages.slice(split).map(text)];
   return { actions, issues: [...issues], shownProductIds: cards.map((card) => card.id) };
 }

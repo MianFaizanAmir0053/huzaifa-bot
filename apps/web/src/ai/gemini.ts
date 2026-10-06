@@ -274,7 +274,8 @@ function httpError(model: string, status: number, body: Pick<GenerateContentResp
   return new GeminiError(`Gemini ${model} HTTP ${status}: ${body.error?.message ?? "request failed"}`, "http", status, dailyQuota, quotaProject);
 }
 
-// Matches the products.embedding column (vector(768)); gemini-embedding models shorten their output to it.
+// Matches the products.embedding and product_images.image_embedding columns (vector(768)); gemini-embedding
+// models shorten (and re-normalise) their output to it.
 export const EMBEDDING_DIMENSIONS = 768;
 
 export type GeminiEmbedRequest = {
@@ -292,6 +293,35 @@ export type GeminiEmbedRequest = {
 
 // One text → one 768-number vector, with the same key rotation and cooldowns as generateGeminiJson.
 export function embedText(request: GeminiEmbedRequest): Promise<number[]> {
+  return embedContent(request, 8_000, {
+    content: { parts: [{ text: request.text.slice(0, 8_000) }] },
+    taskType: request.taskType,
+    ...(request.title && request.taskType === "RETRIEVAL_DOCUMENT" ? { title: request.title.slice(0, 200) } : {}),
+  });
+}
+
+export type GeminiImageEmbedRequest = {
+  apiKey: string | readonly string[];
+  // A multimodal embedding model (gemini-embedding-2): photos and text share one space.
+  model: string;
+  image: { base64: string; mimeType: string };
+  timeoutMs?: number;
+  onAttempt?: (attempt: GeminiAttempt) => void;
+  fetchImpl?: typeof fetch;
+};
+
+// One photo → one 768-number vector. A photo alone needs no task prefix; JPEG, PNG and WebP are accepted.
+export function embedImage(request: GeminiImageEmbedRequest): Promise<number[]> {
+  return embedContent(request, 15_000, { content: { parts: [{ inline_data: { mime_type: request.image.mimeType, data: request.image.base64 } }] } });
+}
+
+type EmbedContentResponse = GenerateContentResponse & { embedding?: { values?: unknown }; embeddings?: { values?: unknown }[] };
+
+async function embedContent(
+  request: Pick<GeminiEmbedRequest, "apiKey" | "model" | "timeoutMs" | "onAttempt" | "fetchImpl">,
+  defaultTimeoutMs: number,
+  content: Record<string, unknown>,
+): Promise<number[]> {
   const { model } = request;
   return acrossKeys(request.apiKey, model, request.onAttempt, async (key) => {
     const fetchImpl = request.fetchImpl ?? fetch;
@@ -300,20 +330,16 @@ export function embedText(request: GeminiEmbedRequest): Promise<number[]> {
       response = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:embedContent`, {
         method: "POST",
         headers: { "content-type": "application/json", "x-goog-api-key": key },
-        signal: AbortSignal.timeout(request.timeoutMs ?? 8_000),
-        body: JSON.stringify({
-          content: { parts: [{ text: request.text.slice(0, 8_000) }] },
-          taskType: request.taskType,
-          ...(request.title && request.taskType === "RETRIEVAL_DOCUMENT" ? { title: request.title.slice(0, 200) } : {}),
-          outputDimensionality: EMBEDDING_DIMENSIONS,
-        }),
+        signal: AbortSignal.timeout(request.timeoutMs ?? defaultTimeoutMs),
+        body: JSON.stringify({ ...content, outputDimensionality: EMBEDDING_DIMENSIONS }),
       });
     } catch (error) {
       throw fetchFailure(model, error);
     }
-    const body = (await response.json().catch(() => ({}))) as GenerateContentResponse & { embedding?: { values?: unknown } };
+    const body = (await response.json().catch(() => ({}))) as EmbedContentResponse;
     if (!response.ok) throw httpError(model, response.status, body);
-    const values = body.embedding?.values;
+    // embedContent answers with `embedding`; the batch form (and possibly future versions) with `embeddings`.
+    const values = body.embedding?.values ?? body.embeddings?.[0]?.values;
     if (!Array.isArray(values) || values.length !== EMBEDDING_DIMENSIONS || !values.every((value) => typeof value === "number" && Number.isFinite(value))) {
       throw new GeminiError(`Gemini ${model} returned no usable embedding`, "empty");
     }

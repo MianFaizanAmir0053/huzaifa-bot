@@ -27,6 +27,11 @@ export const ShopSettingsSchema = z.object({
   deliveryFeePkr: z.number().int().min(0).max(100_000).nullable().default(null),
   // Orders with items worth at least this much ship free; null = no free-delivery threshold.
   freeDeliveryFromPkr: z.number().int().min(0).max(10_000_000).nullable().default(null),
+  // One reminder to a customer who saw the priced summary but didn't confirm, this many minutes later
+  // (only during opening hours, within a day of their last message). null = never remind.
+  cartReminderMinutes: z.number().int().min(15).max(24 * 60).nullable().default(60),
+  // WhatsApp notes to the owner about carts that went quiet and placed orders still waiting for confirmation.
+  ownerFollowUps: z.boolean().default(true),
 });
 export type ShopSettings = z.infer<typeof ShopSettingsSchema>;
 
@@ -49,6 +54,12 @@ export function karachiTime(now: Date): { day: (typeof DAY_KEYS)[number]; hour: 
   const minute = local.getUTCMinutes();
   const label = `${DAY_KEYS[local.getUTCDay()]} ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
   return { day: DAY_KEYS[local.getUTCDay()]!, hour, minute, label };
+}
+
+// Midnight in Pakistan (UTC+5, no daylight saving), as an instant.
+export function karachiDayStart(now: Date): Date {
+  const local = new Date(now.getTime() + 5 * 60 * 60 * 1_000);
+  return new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()) - 5 * 60 * 60 * 1_000);
 }
 
 export type ShopStatus = { open: boolean; nowLabel: string; hoursLabel: string; nextOpenLabel: string | null };

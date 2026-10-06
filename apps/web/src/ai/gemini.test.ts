@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { GeminiError, generateGeminiJson, orderByHealth, parseGeminiKeys, resetModelHealth } from "./gemini";
+import { embedImage, GeminiError, generateGeminiJson, orderByHealth, parseGeminiKeys, resetModelHealth } from "./gemini";
 
 beforeEach(() => resetModelHealth());
 
@@ -267,5 +267,53 @@ describe("quota edge cases", () => {
     await generateGeminiJson({ ...request(["a".repeat(30)], fetchImpl), model: "pro", fallbackModels: ["lite"], timeoutMs: 15_000, lastResortAfterMs: 1_200 });
     // Slow once isn't overloaded: the stronger model stays first for the next message.
     expect(orderByHealth(["pro", "lite"])).toEqual(["pro", "lite"]);
+  });
+});
+
+describe("embedImage", () => {
+  const vector = (length = 768) => Array.from({ length }, (_, index) => (index % 7) / 10);
+  const embedding = (body: Record<string, unknown>) => new Response(JSON.stringify(body), { status: 200 });
+  const image = { base64: "AAAA", mimeType: "image/webp" };
+
+  it("sends the photo alone (no task type) and asks for 768 numbers", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => embedding({ embedding: { values: vector() } }));
+    const values = await embedImage({ apiKey: "k".repeat(30), model: "gemini-embedding-2", image, fetchImpl });
+    expect(values).toHaveLength(768);
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(String(url)).toContain("/models/gemini-embedding-2:embedContent");
+    expect(JSON.parse(String(init?.body))).toEqual({ content: { parts: [{ inline_data: { mime_type: "image/webp", data: "AAAA" } }] }, outputDimensionality: 768 });
+  });
+
+  it("also reads the embeddings[0] answer shape", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => embedding({ embeddings: [{ values: vector() }] }));
+    await expect(embedImage({ apiKey: "k".repeat(30), model: "m", image, fetchImpl })).resolves.toHaveLength(768);
+  });
+
+  it("rejects a vector of the wrong size or with non-numbers", async () => {
+    for (const values of [vector(3072), [...vector(767), "x"], []]) {
+      const fetchImpl = vi.fn<typeof fetch>(async () => embedding({ embedding: { values } }));
+      await expect(embedImage({ apiKey: "k".repeat(30), model: "m", image, fetchImpl })).rejects.toMatchObject({ kind: "empty" });
+    }
+  });
+
+  it("fails over to the next key on a rate limit, like the other calls", async () => {
+    const used: string[] = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
+      used.push(keyOf(init));
+      return used.length === 1 ? fail(429) : embedding({ embedding: { values: vector() } });
+    });
+    const attempts: string[] = [];
+    await embedImage({ apiKey: ["a".repeat(30), "b".repeat(30)], model: "m", image, fetchImpl, onAttempt: (attempt) => void attempts.push(attempt.outcome) });
+    expect(new Set(used).size).toBe(2);
+    expect(attempts).toEqual(["429", "ok"]);
+  });
+
+  it("reports a timeout as one", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "TimeoutError" })));
+      });
+    });
+    await expect(embedImage({ apiKey: "k".repeat(30), model: "m", image, timeoutMs: 20, fetchImpl })).rejects.toMatchObject({ kind: "timeout" });
   });
 });

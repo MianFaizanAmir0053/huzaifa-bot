@@ -788,3 +788,105 @@ describe("owner messages", () => {
     await expect(brain.reportOwnerMessage(photoMessage)).rejects.toThrow();
   });
 });
+
+describe("scheduled follow-ups", () => {
+  const reminder = (index: number, recipientChatId = customer) => ({
+    actionId: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    recipientChatId,
+    type: "text" as const,
+    text: `Reminder ${index}`,
+  });
+
+  it("types, sends and reports each chat's follow-ups, one chat after another", async () => {
+    const { brain, reports } = scriptedBrain([]);
+    const transport = new TestTransport();
+    const sleep = async (ms: number) => {
+      transport.events.push(`sleep:${ms}`);
+    };
+    await new MessageProcessor(transport, brain, { sleep, scheduledGapMs: 4_000 }).sendScheduled([reminder(1), reminder(2, shopOwner)]);
+    expect(transport.events).toEqual([
+      `typing:${customer}:on`,
+      "sleep:900",
+      `text:${customer}:Reminder 1`,
+      `typing:${customer}:off`,
+      "sleep:4000",
+      `typing:${shopOwner}:on`,
+      "sleep:900",
+      `text:${shopOwner}:Reminder 2`,
+      `typing:${shopOwner}:off`,
+    ]);
+    expect(reports).toEqual([
+      {
+        acknowledgements: [
+          { actionId: reminder(1).actionId, status: "sent", providerMessageId: "sent-1" },
+          { actionId: reminder(2).actionId, status: "sent", providerMessageId: "sent-2" },
+        ],
+      },
+    ]);
+  });
+
+  it("drops a follow-up for a chat whose customer is being answered or still typing", async () => {
+    let releaseTurn = () => {};
+    const brain = new BrainClient({
+      baseUrl: "https://brain.example.com",
+      hmacSecret: secret,
+      timeoutMs: 5_000,
+      fetchImplementation: async (input, init) => {
+        if (input.toString().endsWith("/deliveries")) return json({ updated: 1 });
+        const body = JSON.parse(String(init?.body));
+        await new Promise<void>((resolve) => {
+          releaseTurn = resolve;
+        });
+        return json({ eventId: body.eventId, duplicate: false, actions: [{ actionId: actionIds[0], recipientChatId: customer, type: "text", text: "Ji, M available hai" }] });
+      },
+    });
+    const transport = new TestTransport();
+    const processor = new MessageProcessor(transport, brain, { sleep: noSleep, mergeWindowMs: 0 });
+    const turn = processor.enqueue(textMessage({ id: "m1", chatId: customer, text: "confirm" }));
+    await vi.waitFor(() => expect(transport.events).toContain(`typing:${customer}:on`));
+    await processor.sendScheduled([reminder(1)]);
+    releaseTurn();
+    await turn;
+    expect(transport.sent.map((message) => message.text)).toEqual(["Ji, M available hai"]);
+
+    // A burst still inside its merge window counts too.
+    const { brain: idleBrain, reports } = scriptedBrain([]);
+    const typing = new MessageProcessor(new TestTransport(), idleBrain, { sleep: noSleep, mergeWindowMs: 60_000 });
+    void typing.enqueue(textMessage({ id: "m2", chatId: customer, text: "confirm" }));
+    await typing.sendScheduled([reminder(2)]);
+    expect(reports[0]).toEqual({ acknowledgements: [{ actionId: reminder(2).actionId, status: "failed", errorCode: "customer_active" }] });
+    await typing.drain();
+  });
+
+  it("holds follow-ups back from a chat the owner is handling", async () => {
+    const { brain, reports } = scriptedBrain([]);
+    const transport = new TestTransport();
+    const processor = new MessageProcessor(transport, brain, { sleep: noSleep });
+    await processor.reportOwnerMessage({ id: "owner-1", chatId: customer, alternateChatIds: [], occurredAt: "2026-10-06T10:00:00.000Z", type: "text", text: "Ji main dekhta hoon" });
+    await processor.sendScheduled([reminder(1), reminder(2, shopOwner)]);
+    expect(transport.sent).toEqual([{ chatId: shopOwner, text: "Reminder 2" }]);
+    expect(reports.at(-1)).toEqual({
+      acknowledgements: [
+        { actionId: reminder(1).actionId, status: "failed", errorCode: "owner_active" },
+        { actionId: reminder(2).actionId, status: "sent", providerMessageId: "sent-1" },
+      ],
+    });
+  });
+
+  it("keeps the round's valid follow-ups when one action is malformed", async () => {
+    const brain = new BrainClient({
+      baseUrl: "https://brain.example.com",
+      hmacSecret: secret,
+      timeoutMs: 1_000,
+      fetchImplementation: async () => json({ actions: [reminder(1), { ...reminder(2), text: "x".repeat(4_001) }] }),
+    });
+    await expect(brain.fetchFollowUps()).resolves.toEqual({ actions: [reminder(1)], invalid: 1 });
+  });
+
+  it("splits delivery reports into the brain's limit of 8", async () => {
+    const { brain, reports } = scriptedBrain([]);
+    const processor = new MessageProcessor(new TestTransport(), brain, { sleep: noSleep });
+    await processor.sendScheduled(Array.from({ length: 10 }, (_, index) => reminder(index + 1, `92300000000${index}@c.us`)));
+    expect(reports.map((report) => (report as { acknowledgements: unknown[] }).acknowledgements.length)).toEqual([8, 2]);
+  });
+});

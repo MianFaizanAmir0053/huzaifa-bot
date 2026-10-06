@@ -57,6 +57,10 @@ export type FallbackInput = {
   focusRef?: string;
   // A clear best match by meaning for words the keyword search didn't know.
   similarRef?: string;
+  // A product whose photo is a near-identical match for the customer's photo (nobody checked it by eye).
+  photoRef?: string;
+  // The customer has been waiting a long time (the bot was offline when they wrote).
+  late?: boolean;
 };
 
 type Lines = Record<Language, string>;
@@ -132,6 +136,10 @@ export function fallbackDraft(input: FallbackInput): DraftReply {
         language,
       ),
     );
+  } else if (input.photoRef) {
+    // Asked, never claimed: without the model nobody compared the photos.
+    showProducts = [input.photoRef];
+    messages.push(pick({ en: "Is it this one? 👇", roman_ur: "Kya ye wala hai? 👇", ur: "کیا یہ والا ہے؟ 👇" }, language));
   } else if (input.focusRef && input.filters.size && !input.filters.category && !input.filters.color) {
     // "M hai is mein?" asks about the product already shown, not the whole catalog.
     messages.push(`{{size:${input.focusRef}:${input.filters.size}}}.`);
@@ -189,7 +197,8 @@ export function fallbackDraft(input: FallbackInput): DraftReply {
         ),
       );
     }
-  } else if (BROWSE.test(input.text) || (input.hasPhoto && !input.text)) {
+  } else if (BROWSE.test(input.text) || input.hasPhoto) {
+    // A photo with a caption like "ye available hai?" gets the photo reply too, not "I didn't get that".
     showProducts = cardsFrom(overview.newest, input.refs);
     messages.push(
       input.hasPhoto
@@ -238,6 +247,9 @@ export function fallbackDraft(input: FallbackInput): DraftReply {
     );
   }
 
+  if (input.late) {
+    messages[0] = `${pick({ en: "Sorry for the late reply!", roman_ur: "Maazrat, jawab mein der ho gayi.", ur: "معذرت، جواب میں دیر ہو گئی۔" }, language)} ${messages[0]}`;
+  }
   // Mentioned once, after the actual answer, so the reply still opens like a person would.
   if (input.firstContact && !input.wantsHuman) messages[0] = `${messages[0]}\n\n${disclosure(language)}`;
   return { language, messages: messages.slice(0, 3), showProducts };

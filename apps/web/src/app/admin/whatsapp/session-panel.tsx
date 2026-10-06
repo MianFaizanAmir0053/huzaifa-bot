@@ -21,6 +21,21 @@ const stateText: Record<GatewaySession["state"], string> = {
   error: "Error",
 };
 
+// Relative to this render; the panel re-renders on every poll. The server's render runs a moment earlier,
+// hence suppressHydrationWarning wherever this is shown.
+function ago(iso: string): string {
+  const seconds = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1_000));
+  if (seconds < 60) return `${seconds} s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? `${hours} h ago` : `${Math.round(hours / 24)} days ago`;
+}
+
+function count(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? "" : "s"}`;
+}
+
 export function SessionPanel({ initial }: { initial: GatewayResult<GatewaySession> }) {
   const [result, setResult] = useState(initial);
   const [notice, setNotice] = useState<string | null>(null);
@@ -51,15 +66,46 @@ export function SessionPanel({ initial }: { initial: GatewayResult<GatewaySessio
   }
 
   const session = result.data;
+  const connected = session.state === "ready";
+  // Connected but failing its liveness checks: the gateway restarts it if that goes on.
+  const unresponsive = connected && session.healthy === false;
   return (
     <section className="panel session-panel" aria-live="polite">
       <div className="session-head">
-        <span className={`session-dot ${session.state}`} aria-hidden="true" />
+        <span className={`session-dot ${unresponsive ? "error" : session.state}`} aria-hidden="true" />
         <strong>{stateText[session.state]}</strong>
         {session.phoneNumber ? <span className="muted">+{session.phoneNumber}</span> : null}
       </div>
       {session.detail && session.state !== "ready" ? <p className="muted">{session.detail}</p> : null}
       {session.reconnectAttempts && session.state !== "ready" ? <p className="muted">Reconnect attempts: {session.reconnectAttempts}</p> : null}
+      {unresponsive ? (
+        <p className="form-status error" role="alert">
+          Not responding — restarting if it doesn&apos;t recover
+        </p>
+      ) : connected && session.lastHealthCheckAt ? (
+        <p className="muted" suppressHydrationWarning>
+          Connection check OK {ago(session.lastHealthCheckAt)}
+        </p>
+      ) : null}
+      {connected && session.lastInboundAt ? (
+        <p className="muted" suppressHydrationWarning>
+          Last message received {ago(session.lastInboundAt)}
+        </p>
+      ) : null}
+      {connected && session.missedMessageCheck === false ? (
+        <p className="form-status error" role="alert">
+          Can&apos;t read the chat list, so messages WhatsApp fails to report would go unanswered. Restart the session; if it keeps
+          happening, whatsapp-web.js needs an update.
+        </p>
+      ) : null}
+      {session.recoveredMessages ? <p className="muted">Recovered {count(session.recoveredMessages, "missed message")} since the gateway started</p> : null}
+      {session.ignoredSavedContacts ? <p className="muted">Ignoring {count(session.ignoredSavedContacts, "message")} from saved contacts</p> : null}
+      {session.lastAutoRestartAt ? (
+        <p className="muted small" suppressHydrationWarning>
+          Restarted itself {ago(session.lastAutoRestartAt)}
+          {session.lastAutoRestartReason ? `: ${session.lastAutoRestartReason}` : ""}
+        </p>
+      ) : null}
 
       {session.state === "qr_pending" && session.qrDataUrl ? (
         <div className="qr-box">

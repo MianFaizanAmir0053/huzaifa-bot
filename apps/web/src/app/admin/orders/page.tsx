@@ -2,7 +2,7 @@ import { AutoRefresh } from "../_components/auto-refresh";
 import { NavLink } from "../_components/nav-link";
 import { formatPrice } from "@/agent/compose";
 import { requireAdmin } from "@/auth/admin";
-import { ORDER_STATUS_LABELS, ORDER_TABS, listOrders, type OrderTab } from "@/orders/admin-queries";
+import { ORDER_STATUS_LABELS, ORDER_TABS, listOrders, type OrderSummary, type OrderTab } from "@/orders/admin-queries";
 
 const EMPTY_TEXT: Record<OrderTab, string> = {
   new: "No new orders. When a customer confirms an order in WhatsApp it shows up here, and you get a WhatsApp alert.",
@@ -10,7 +10,7 @@ const EMPTY_TEXT: Record<OrderTab, string> = {
   shipped: "Nothing on its way right now.",
   done: "No delivered orders yet.",
   cancelled: "No cancelled orders.",
-  carts: "No open carts. Carts are orders customers are still filling in with the bot.",
+  carts: "No open carts. Carts are orders customers are still filling in with the bot, or haven't confirmed yet.",
 };
 
 function timeAgo(iso: string): string {
@@ -20,6 +20,15 @@ function timeAgo(iso: string): string {
   const hours = Math.round(minutes / 60);
   if (hours < 24) return `${hours} h ago`;
   return new Date(iso).toLocaleDateString("en-PK", { day: "numeric", month: "short" });
+}
+
+// Where an open cart stands: still being filled in, or waiting for the customer's confirm (and who was nudged).
+function followUpLabel(followUp: NonNullable<OrderSummary["followUp"]>): string {
+  if (!followUp.summarySentAt) return "Still filling in details";
+  const parts = [`Summary sent ${timeAgo(followUp.summarySentAt)}, not confirmed`];
+  if (followUp.remindedAt) parts.push(`reminded ${timeAgo(followUp.remindedAt)}`);
+  if (followUp.ownerAlertedAt) parts.push("you were alerted");
+  return parts.join(" · ");
 }
 
 export default async function OrdersPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
@@ -64,6 +73,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
                         #{order.number} · {order.customer}
                       </strong>
                       <span className="muted conversation-preview">{order.itemsLabel}</span>
+                      {order.followUp ? <span className="muted small">{followUpLabel(order.followUp)}</span> : null}
                     </span>
                     <span className="product-row-meta">
                       <span>{formatPrice(order.itemsTotalPkr + (order.deliveryFeePkr ?? 0))}</span>

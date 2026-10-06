@@ -46,6 +46,35 @@ export function shownProductIds(messages: readonly StoredMessage[]): string[] {
   return ids;
 }
 
+// A product without a photo is sent as a text card: "*Name*\nPrice: …" (compose.ts productCaption).
+const TEXT_CARD = /^\*([^*\n]{1,160})\*\n(?:Price|Qeemat|قیمت):/;
+
+// Products whose card (photo or text) went out in the bot's last `turns` replies, newest first.
+export function recentCardProductIds(messages: readonly StoredMessage[], productIdByName: ReadonlyMap<string, string>, turns = 2): Set<string> {
+  const ids = new Set<string>();
+  let botTurns = 0;
+  let inBotTurn = false;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.direction === "inbound") {
+      if (inBotTurn && ++botTurns >= turns) break;
+      inBotTurn = false;
+      continue;
+    }
+    if (message.source !== "agent") continue;
+    inBotTurn = true;
+    const photoProduct = message.mediaPath?.match(PRODUCT_PATH)?.[1];
+    if (photoProduct) ids.add(photoProduct);
+    // Several photo-less products share one text message, separated by a blank line.
+    for (const block of (message.text ?? "").split(/\n{2,}/)) {
+      const name = block.trim().match(TEXT_CARD)?.[1];
+      const id = name ? productIdByName.get(name) : undefined;
+      if (id) ids.add(id);
+    }
+  }
+  return ids;
+}
+
 const ROLE_LABEL: Record<HistoryLine["role"], string> = { customer: "Customer", assistant: "You", owner: "Shop team member" };
 
 // One chat message stays on one line, and prompt delimiters are removed, so a customer can't forge

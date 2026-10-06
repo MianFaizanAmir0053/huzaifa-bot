@@ -38,6 +38,8 @@ export type OrderSummary = {
   deliveryFeePkr: number | null;
   placedAt: string | null;
   updatedAt: string;
+  // Carts only, once the follow-ups migration is applied: what the customer saw and who was nudged.
+  followUp?: { summarySentAt: string | null; remindedAt: string | null; ownerAlertedAt: string | null };
 };
 
 export type OrderDetail = OrderSummary & {
@@ -67,32 +69,43 @@ function customerLabel(name: string | null, contact: ContactRow | null): string 
   return name || contact?.customer_name || contact?.display_name || "Customer";
 }
 
+type ListRow = {
+  id: string;
+  order_number: number;
+  status: OrderStatus;
+  customer_name: string | null;
+  city: string | null;
+  items_total_pkr: number;
+  delivery_fee_pkr: number | null;
+  placed_at: string | null;
+  updated_at: string;
+  contacts: ContactRow | null;
+  order_items: Pick<ItemRow, "product_name" | "size_label" | "quantity" | "line_number">[];
+  // Only selected for carts, and only once the follow-ups migration is applied.
+  summary_sent_at?: string | null;
+  reminder_sent_at?: string | null;
+  cart_alerted_at?: string | null;
+};
+
+const LIST_COLUMNS = "id, order_number, status, customer_name, city, items_total_pkr, delivery_fee_pkr, placed_at, updated_at, contacts(*), order_items(product_name, size_label, quantity, line_number)";
+const FOLLOW_UP_COLUMNS = ", summary_sent_at, reminder_sent_at, cart_alerted_at";
+
 export async function listOrders(tab: OrderTab): Promise<OrdersResult<OrderSummary[]>> {
   const supabase = await createSupabaseServerClient();
-  const { data, error } = await supabase
-    .from("orders")
-    .select("id, order_number, status, customer_name, city, items_total_pkr, delivery_fee_pkr, placed_at, updated_at, contacts(*), order_items(product_name, size_label, quantity, line_number)")
-    .in("status", [...ORDER_TABS[tab].statuses])
-    .order(tab === "carts" ? "updated_at" : "placed_at", { ascending: false })
-    .limit(100)
-    .returns<
-      {
-        id: string;
-        order_number: number;
-        status: OrderStatus;
-        customer_name: string | null;
-        city: string | null;
-        items_total_pkr: number;
-        delivery_fee_pkr: number | null;
-        placed_at: string | null;
-        updated_at: string;
-        contacts: ContactRow | null;
-        order_items: Pick<ItemRow, "product_name" | "size_label" | "quantity" | "line_number">[];
-      }[]
-    >();
-  if (error) {
-    if (isMissingSchema(error)) return { available: false };
-    throw new Error(`Could not load orders: ${error.message}`);
+  const select = (columns: string) =>
+    supabase
+      .from("orders")
+      .select(columns)
+      .in("status", [...ORDER_TABS[tab].statuses])
+      .order(tab === "carts" ? "updated_at" : "placed_at", { ascending: false })
+      .limit(100)
+      .returns<ListRow[]>();
+  let { data, error } = await select(tab === "carts" ? LIST_COLUMNS + FOLLOW_UP_COLUMNS : LIST_COLUMNS);
+  // Before the follow-ups migration the extra columns don't exist; the list still works without them.
+  if (error && tab === "carts" && isMissingSchema(error)) ({ data, error } = await select(LIST_COLUMNS));
+  if (error || !data) {
+    if (error && isMissingSchema(error)) return { available: false };
+    throw new Error(`Could not load orders: ${error?.message ?? "no data"}`);
   }
   return {
     available: true,
@@ -107,6 +120,9 @@ export async function listOrders(tab: OrderTab): Promise<OrdersResult<OrderSumma
       deliveryFeePkr: row.delivery_fee_pkr,
       placedAt: row.placed_at,
       updatedAt: row.updated_at,
+      ...(row.summary_sent_at !== undefined
+        ? { followUp: { summarySentAt: row.summary_sent_at ?? null, remindedAt: row.reminder_sent_at ?? null, ownerAlertedAt: row.cart_alerted_at ?? null } }
+        : {}),
     })),
   };
 }

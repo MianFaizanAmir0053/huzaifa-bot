@@ -36,14 +36,16 @@ Bulk catalog import: `pnpm --filter @huzaifa/web import:catalog path/to/manifest
 
 ## How a reply is made
 
-1. **Gateway** waits ~2.5 s to merge a burst of messages from one chat, shows "typing…", and forwards one turn.
+1. **Gateway** waits ~2.5 s to merge a burst of messages from one chat, shows "typing…", and forwards one turn. It also watches its own WhatsApp session (restarts a hung or crashed browser, notices when messages stop arriving) and answers messages that came in while it was down (not at night, not from before the number was linked), with an apology for the wait.
 2. **Quick checks (no AI):** duplicate, paused chat, spam limit, "human/call" requests.
 3. **Memory:** last ~16 messages (customer, bot and owner), a running summary, the customer's name/city/language, products already shown.
 4. **Search (no AI):** colour, garment, size and budget are read from the words (English, Roman Urdu, Urdu; laal = red, kameez = shirt…); results are split into exact matches and honest alternatives.
 5. **Meaning search:** words the vocabulary doesn't know ("chadar", "burqa", "pishwas", misspellings) are embedded with Gemini and matched against product embeddings in the database (pgvector); the closest items are offered as guesses.
+   **Photo search:** a customer's photo is embedded with Gemini's image model and matched against the shop's product photos (pgvector); the closest few go to the agent with their shop photos attached, so it compares them by eye before calling anything the same item.
 6. **Agent (Gemini):** writes 1–3 short messages in the customer's language and tone, can call search/product/browse tools (≤2 rounds, 30 s budget), builds the customer's order, and may ask for a person. The language to answer in is detected by code and pinned.
 7. **Fact check (code):** products appear only as `{{product:P1}}` / `{{size:P1:M}}` / `{{sizes:P1}}` tags and photo cards; names, prices and stock are filled from the database; typed prices, stock counts, untagged size claims and false "order placed" claims are rejected (one rewrite, then removed).
 8. **Orders (code):** the order the model describes is checked against the catalog and stock; when it's complete the customer gets a priced summary (items, delivery, total), and it's placed only when they confirm that exact summary. The owner gets a WhatsApp alert and confirms, ships or cancels it under **Orders** (stock is taken on confirm).
+   A customer who saw the summary and went quiet gets one reminder (during opening hours, never at night); the owner gets a note about carts that stay quiet and placed orders still waiting for confirmation. The gateway asks the brain for these every 5 minutes (`/api/gateway/followups`).
 9. **Handoff:** the owner gets an alert; the bot keeps helping until the owner replies in that chat, then steps back until "Resume bot".
 10. **After the reply:** the conversation summary is refreshed in the background.
 
@@ -66,6 +68,6 @@ pnpm build
 - **Conversations** — who needs a person, message history, lead status, orders, private notes, Resume bot, delete customer data
 - **Orders** — new orders to confirm (takes stock), ship (optional tracking number), deliver or cancel (gives stock back), each optionally messaging the customer on WhatsApp; open carts
 - **WhatsApp** — QR linking, connection status, restart/unlink
-- **Shop info** — delivery, payment, returns, hours, address, order taking and delivery charges, tone notes and real example chats the assistant learns its voice from
+- **Shop info** — delivery, payment, returns, hours, address, order taking and delivery charges, order reminders and owner notes, tone notes and real example chats the assistant learns its voice from
 
 `whatsapp-web.js` is unofficial and can break or get a number banned. Use a dedicated number and keep the transport boundary (`apps/gateway/src/transport.ts`) so the gateway can move to the Meta Cloud API later.

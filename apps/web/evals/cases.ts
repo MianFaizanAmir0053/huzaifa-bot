@@ -140,6 +140,22 @@ export const EVAL_CASES: EvalCase[] = [
 
   // Follow-ups using history.
   { id: "followup-other-colour", message: "aur koi colour hai?", language: "roman_ur", history: [{ from: "customer", text: "red kurta hai?" }, { from: "shop", text: "Ji ye dekhein 👇", productPhoto: RUBY }], expectCards: "some" },
+  // A real chat: the customer said no to the item and the bot kept sending its card every turn.
+  {
+    id: "followup-declined",
+    message: "nahi ye wala nahi chahiye, kuch aur dikhao",
+    language: "roman_ur",
+    history: [{ from: "customer", text: "red kurta hai?" }, { from: "shop", text: "Ji ye dekhein 👇", productPhoto: RUBY }],
+    mustNotShow: [RUBY],
+    mustNotMatch: [ROBOTIC],
+  },
+  {
+    id: "followup-declined-en",
+    message: "no, I don't like that one",
+    language: "en",
+    history: [{ from: "customer", text: "do you have a blue shirt?" }, { from: "shop", text: "Here you go 👇", productPhoto: OXFORD }],
+    mustNotShow: [OXFORD],
+  },
   { id: "followup-pehle-wala", message: "pehle wala kitne ka tha?", language: "roman_ur", history: [{ from: "customer", text: "blue shirt?" }, { from: "shop", text: "Ye dekhein", productPhoto: OXFORD }, { from: "customer", text: "aur kurta?" }, { from: "shop", text: "Ye bhi hai", productPhoto: RUBY }] },
 
   // Shop policies from Shop info (numbers there may be quoted).

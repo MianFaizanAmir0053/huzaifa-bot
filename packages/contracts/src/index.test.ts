@@ -107,3 +107,14 @@ describe("agent-era contracts", () => {
     expect(parsed.alternateChatIds).toEqual([]);
   });
 });
+
+describe("follow-up contracts", () => {
+  it("needs a timestamp in the request and caps the actions in the response", async () => {
+    const { FollowUpRequestSchema, FollowUpResponseSchema } = await import("./index.js");
+    expect(FollowUpRequestSchema.safeParse({ requestedAt: "2026-10-06T10:00:00.000Z" }).success).toBe(true);
+    expect(FollowUpRequestSchema.safeParse({}).success).toBe(false);
+    const action = (index: number) => ({ actionId: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`, recipientChatId: "923001234567@c.us", type: "text", text: "Reminder" });
+    expect(FollowUpResponseSchema.safeParse({ actions: [action(1)] }).success).toBe(true);
+    expect(FollowUpResponseSchema.safeParse({ actions: Array.from({ length: 11 }, (_, index) => action(index)) }).success).toBe(false);
+  });
+});

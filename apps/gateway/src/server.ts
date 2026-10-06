@@ -25,9 +25,11 @@ export function buildServer(transport: WhatsAppTransport, adminToken: string, op
   const server = Fastify({ logger: options.logger ?? true, bodyLimit: 16 * 1024, disableRequestLogging: true });
 
   server.get("/health/live", async () => ({ status: "ok" }));
+  // A session that says "ready" but failed its last liveness check delivers nothing, so it isn't ready either.
   server.get("/health/ready", async (_request, reply) => {
     const session = transport.getSessionSnapshot();
-    return reply.code(session.state === "ready" ? 200 : 503).send({ status: session.state });
+    const ready = session.state === "ready" && session.healthy !== false;
+    return reply.code(ready ? 200 : 503).send({ status: session.state, healthy: session.healthy });
   });
 
   server.get("/session", { preHandler: authenticate }, async (_request, reply) => {

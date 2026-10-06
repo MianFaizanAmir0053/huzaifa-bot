@@ -3,7 +3,7 @@ import type { InboundMessage, OutboundAction } from "@huzaifa/contracts";
 import { resetModelHealth } from "../ai/gemini";
 import { OrderError, type AgentRunRecord, type BrainRepository, type ConversationState, type CustomerDetails, type IngestResult, type OpenHandoff, type SavedOrderDraft } from "../catalog/repository";
 import type { CatalogItem } from "../catalog/search";
-import type { SemanticHit } from "../catalog/semantic";
+import type { PhotoHit, SemanticHit } from "../catalog/semantic";
 import { EMPTY_DETAILS, NO_ORDERS, orderFingerprint, type OrderDraft, type OrderState } from "../orders/cart";
 import { DEFAULT_SHOP_SETTINGS } from "../shop/settings";
 import type { StoredMessage } from "./memory";
@@ -128,6 +128,12 @@ class FakeRepository implements BrainRepository {
   async matchProducts(): Promise<SemanticHit[]> {
     this.semanticQueries += 1;
     return this.semantic;
+  }
+  photo: PhotoHit[] = [];
+  photoQueries: { count: number; minSimilarity: number }[] = [];
+  async matchProductImages(_embedding: readonly number[], count: number, minSimilarity: number): Promise<PhotoHit[]> {
+    this.photoQueries.push({ count, minSimilarity });
+    return this.photo;
   }
 }
 
@@ -655,5 +661,176 @@ describe("meaning-based search", () => {
     // "red kurta" is fully understood by the keyword search: no embedding call.
     await processInboundMessage(message("red kurta hai?"), deps(repository, { agent: agentDeps(agentFetch), embeddings }));
     expect(embed).toHaveBeenCalledOnce();
+  });
+});
+
+describe("photo search", () => {
+  const embedding = () => new Response(JSON.stringify({ embedding: { values: Array.from({ length: 768 }, () => 0.01) } }), { status: 200 });
+  const photoMessage = (caption = "ye available hai?") =>
+    message(caption, { type: "image", media: { objectPath: `messages/${"a".repeat(24)}/${"b".repeat(32)}.jpg`, mimeType: "image/jpeg", sizeBytes: 2048 } });
+  const photoDeps = (repository: FakeRepository, embed: typeof fetch, extra: Partial<OrchestratorDependencies> = {}) =>
+    deps(repository, {
+      loadImage: async () => ({ base64: "Q1VTVE9NRVI=", mimeType: "image/jpeg" }),
+      photoSearch: { apiKey: ["e".repeat(30)], model: "gemini-embedding-2", fetchImpl: embed },
+      loadProductImage: vi.fn(async () => ({ base64: "U0hPUA==", mimeType: "image/jpeg" })),
+      ...extra,
+    });
+  const kurtaPhoto = "products/22222222-2222-4222-8222-222222222222/a.jpg";
+
+  it("shows the model the products the photo looks like, with their shop photos to compare", async () => {
+    const repository = new FakeRepository();
+    repository.photo = [{ id: redKurta.id, similarity: 0.72, imagePath: kurtaPhoto }];
+    const embed = vi.fn<typeof fetch>(async () => embedding());
+    const bodies: string[] = [];
+    const agentFetch = vi.fn<typeof fetch>(async (_url, init) => {
+      bodies.push(String(init?.body));
+      return gemini({ messages: ["Ji, ye wahi hai 👇"], show_products: ["P1"] });
+    });
+    const dependencies = photoDeps(repository, embed, { agent: agentDeps(agentFetch) });
+    const response = await processInboundMessage(photoMessage(), dependencies);
+
+    // The customer's photo is embedded on its own and matched against the shop's photos.
+    expect(JSON.parse(String(embed.mock.calls[0]![1]?.body)).content.parts).toEqual([{ inline_data: { mime_type: "image/jpeg", data: "Q1VTVE9NRVI=" } }]);
+    expect(repository.photoQueries).toEqual([{ count: 5, minSimilarity: 0.6 }]);
+    expect(dependencies.loadProductImage).toHaveBeenCalledWith(kurtaPhoto);
+    const parts = JSON.parse(bodies[0]!).contents[0].parts;
+    expect(parts[0].text).toMatch(/Looks like the customer's photo \(image similarity, best first — guesses: compare before saying it's the same\):\n\[P1\] Ruby Kurta/);
+    expect(parts[0].text).toContain("The shop photos after it show [P1], to compare with it.");
+    expect(parts.slice(1)).toEqual([
+      { text: "Customer's photo:" },
+      { inline_data: { mime_type: "image/jpeg", data: "Q1VTVE9NRVI=" } },
+      { text: "Shop photo of [P1]:" },
+      { inline_data: { mime_type: "image/jpeg", data: "U0hPUA==" } },
+    ]);
+    expect(JSON.parse(bodies[0]!).systemInstruction.parts[0].text).toContain("Never say it's the same item unless it clearly looks the same");
+    expect(response.actions.map((action) => action.type)).toEqual(["text", "image"]);
+    expect(repository.runs[0]?.diagnostics).toMatchObject({ photo: { hits: ["Ruby Kurta 0.72"], compared: 1 } });
+    expect(repository.runs[0]?.promptVersion).toBe("agent-v6");
+  });
+
+  it("leaves the photo to the model alone when nothing looks like it", async () => {
+    const repository = new FakeRepository();
+    const embed = vi.fn<typeof fetch>(async () => embedding());
+    const bodies: string[] = [];
+    const agentFetch = vi.fn<typeof fetch>(async (_url, init) => {
+      bodies.push(String(init?.body));
+      return gemini({ messages: ["Ye exact abhi nahi hai, rang bata dein?"] });
+    });
+    const dependencies = photoDeps(repository, embed, { agent: agentDeps(agentFetch) });
+    await processInboundMessage(photoMessage(), dependencies);
+    const parts = JSON.parse(bodies[0]!).contents[0].parts;
+    expect(parts[0].text).not.toContain("Looks like the customer's photo");
+    expect(parts[0].text).toContain("Describe what you see only to find similar products.");
+    expect(parts.slice(1)).toEqual([{ inline_data: { mime_type: "image/jpeg", data: "Q1VTVE9NRVI=" } }]);
+    expect(dependencies.loadProductImage).not.toHaveBeenCalled();
+    expect(repository.runs[0]?.diagnostics).toMatchObject({ photo: { hits: [] } });
+  });
+
+  it("still answers when the photo can't be embedded", async () => {
+    const repository = new FakeRepository();
+    repository.photo = [{ id: redKurta.id, similarity: 0.95, imagePath: kurtaPhoto }];
+    const embed = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 }));
+    const agentFetch = vi.fn<typeof fetch>(async () => gemini({ messages: ["Kaunsa rang chahiye?"] }));
+    const response = await processInboundMessage(photoMessage(), photoDeps(repository, embed, { agent: agentDeps(agentFetch) }));
+    expect(texts(response.actions)).toEqual(["Kaunsa rang chahiye?"]);
+    expect(repository.photoQueries).toEqual([]);
+    expect(repository.runs[0]?.diagnostics).toMatchObject({ photo: { hits: [], error: "http_503" } });
+  });
+
+  it("without the AI, offers a near-identical match as a question", async () => {
+    const repository = new FakeRepository();
+    repository.photo = [
+      { id: redKurta.id, similarity: 0.96, imagePath: kurtaPhoto },
+      { id: greenKurta.id, similarity: 0.81, imagePath: null },
+    ];
+    const response = await processInboundMessage(photoMessage(), photoDeps(repository, vi.fn<typeof fetch>(async () => embedding())));
+    expect(texts(response.actions)[0]).toBe("Kya ye wala hai? 👇");
+    const cards = response.actions.filter((action) => action.type === "image");
+    expect(cards).toHaveLength(1);
+    expect(cards[0]?.type === "image" ? cards[0].caption : "").toContain("*Ruby Kurta*");
+  });
+
+  it("without the AI, a merely similar photo gets the usual photo reply", async () => {
+    const repository = new FakeRepository();
+    repository.photo = [{ id: redKurta.id, similarity: 0.74, imagePath: kurtaPhoto }];
+    const response = await processInboundMessage(photoMessage(), photoDeps(repository, vi.fn<typeof fetch>(async () => embedding())));
+    expect(texts(response.actions)[0]).toMatch(/^Photo ka shukriya!/);
+  });
+
+  it("doesn't embed photos while the catalog has none to match", async () => {
+    const repository = new FakeRepository([blueShirt, greenKurta]);
+    const embed = vi.fn<typeof fetch>(async () => embedding());
+    await processInboundMessage(photoMessage(), photoDeps(repository, embed));
+    expect(embed).not.toHaveBeenCalled();
+    expect(repository.runs[0]?.diagnostics).not.toHaveProperty("photo");
+  });
+});
+
+describe("late replies", () => {
+  // Re-delivered after the gateway was down: written two hours before this turn runs.
+  const lateMessage = (text: string) => message(text, { occurredAt: "2026-09-28T14:00:00.000Z" });
+
+  it("asks the model to open with an apology for the wait", async () => {
+    const repository = new FakeRepository();
+    const bodies: string[] = [];
+    const agentFetch = vi.fn<typeof fetch>(async (_url, init) => {
+      bodies.push(String(init?.body));
+      return gemini({ messages: ["Maazrat, der se jawab de raha hoon! Ji bataen?"] });
+    });
+    await processInboundMessage(lateMessage("red kurta hai?"), deps(repository, { agent: agentDeps(agentFetch) }));
+    expect(JSON.parse(bodies[0]!).contents[0].parts[0].text).toContain(
+      "SYSTEM NOTE: They sent this about 2 hours ago and are only now getting an answer (the assistant was offline): start your first message with a short apology for the late reply, in their language.",
+    );
+    expect(repository.runs[0]?.diagnostics).toMatchObject({ lateMinutes: 120 });
+  });
+
+  it("apologises once per backlog, and not for a fresh message", async () => {
+    const repository = new FakeRepository();
+    // The bot already answered (and apologised to) an earlier message of the same backlog.
+    repository.history = [{ id: "h1", direction: "outbound", source: "agent", contentType: "text", text: "Sorry for the late reply!", mediaPath: null, occurredAt: "2026-09-28T15:59:00Z" }];
+    const bodies: string[] = [];
+    const agentFetch = vi.fn<typeof fetch>(async (_url, init) => {
+      bodies.push(String(init?.body));
+      return gemini({ messages: ["Ji bataen?"] });
+    });
+    await processInboundMessage(lateMessage("aur?"), deps(repository, { agent: agentDeps(agentFetch) }));
+    await processInboundMessage(message("aur?"), deps(new FakeRepository(), { agent: agentDeps(agentFetch) }));
+    expect(bodies).toHaveLength(2);
+    expect(bodies.every((body) => !body.includes("apology for the late reply"))).toBe(true);
+  });
+
+  it("has the rules apologise too when the AI is down", async () => {
+    const response = await processInboundMessage(lateMessage("Salam"), deps(new FakeRepository()));
+    expect(texts(response.actions)[0]).toMatch(/^Maazrat, jawab mein der ho gayi\. Walaikum assalam!/);
+  });
+});
+
+describe("repeated product cards (from a real chat)", () => {
+  // The customer saw the Emerald kurta (no photo, so a text card) in the last reply and said they don't want it.
+  const sawEmerald: StoredMessage[] = [
+    { id: "h1", direction: "inbound", source: "customer", contentType: "text", text: "dark colour kurta", mediaPath: null, occurredAt: "2026-09-28T15:58:00Z" },
+    { id: "h2", direction: "outbound", source: "agent", contentType: "text", text: "Ye dekhein 👇", mediaPath: null, occurredAt: "2026-09-28T15:58:10Z" },
+    { id: "h3", direction: "outbound", source: "agent", contentType: "text", text: "*Emerald Lawn Kurta*\nQeemat: Rs 4,500\nSizes: S", mediaPath: null, occurredAt: "2026-09-28T15:58:11Z" },
+  ];
+
+  it("tells the model the card was just sent and drops it when the model sends it again unasked", async () => {
+    const repository = new FakeRepository();
+    repository.history = sawEmerald;
+    const bodies: string[] = [];
+    const agentFetch = vi.fn<typeof fetch>(async (_url, init) => {
+      bodies.push(String(init?.body));
+      return gemini({ messages: ["Koi baat nahi! Ye green wala hi hai abhi 👇", "Kaunsa colour chahiye?"], show_products: ["P1"] });
+    });
+    const response = await processInboundMessage(message("nai chaiye ye wala"), deps(repository, { agent: agentDeps(agentFetch) }));
+    expect(JSON.parse(bodies[0]!).contents[0].parts[0].text).toContain("Emerald Lawn Kurta — kurta, green, lawn — Rs 4,500 — in stock: M [no photo] — card just sent");
+    expect(texts(response.actions)).toEqual(["Koi baat nahi! Ye green wala hi hai abhi", "Kaunsa colour chahiye?"]);
+  });
+
+  it("sends it again when the customer asks for the price", async () => {
+    const repository = new FakeRepository();
+    repository.history = sawEmerald;
+    const agentFetch = vi.fn<typeof fetch>(async () => gemini({ messages: ["Ye rahi details 👇"], show_products: ["P1"] }));
+    const response = await processInboundMessage(message("iski price dobara batao"), deps(repository, { agent: agentDeps(agentFetch) }));
+    expect(texts(response.actions)[1]).toContain("*Emerald Lawn Kurta*");
   });
 });

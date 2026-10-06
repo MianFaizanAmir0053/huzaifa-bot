@@ -40,6 +40,27 @@ describe("gateway admin server", () => {
     expect(ready.statusCode).toBe(503);
     expect(ready.body).not.toContain("base64");
   });
+
+  it("is ready only while connected and passing its liveness checks; always live", async () => {
+    const readiness = async (session: SessionSnapshot) => {
+      const server = buildServer({ ...transport, getSessionSnapshot: () => session }, token, { logger: false });
+      const [ready, live] = await Promise.all([server.inject({ method: "GET", url: "/health/ready" }), server.inject({ method: "GET", url: "/health/live" })]);
+      expect(live.statusCode).toBe(200);
+      return { status: ready.statusCode, body: ready.json() };
+    };
+    // Before the first check (just connected) and after a passing one.
+    expect(await readiness({ state: "ready" })).toEqual({ status: 200, body: { status: "ready" } });
+    expect(await readiness({ state: "ready", healthy: true })).toEqual({ status: 200, body: { status: "ready", healthy: true } });
+    expect(await readiness({ state: "ready", healthy: false })).toEqual({ status: 503, body: { status: "ready", healthy: false } });
+    expect(await readiness({ state: "disconnected", detail: "Restarting automatically: messages stopped arriving" })).toEqual({ status: 503, body: { status: "disconnected" } });
+  });
+
+  it("includes the session's health in the admin details", async () => {
+    const session: SessionSnapshot = { state: "ready", healthy: true, lastHealthCheckAt: "2026-09-29T10:00:00.000Z", lastInboundAt: "2026-09-29T09:58:00.000Z", recoveredMessages: 3 };
+    const server = buildServer({ ...transport, getSessionSnapshot: () => session }, token, { logger: false });
+    const response = await server.inject({ method: "GET", url: "/session", headers: { authorization: `Bearer ${token}` } });
+    expect(response.json()).toEqual(session);
+  });
 });
 
 describe("pairing code", () => {
