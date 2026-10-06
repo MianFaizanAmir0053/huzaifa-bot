@@ -64,24 +64,32 @@ export function parseProductSheet(text: string): { rows: SheetRowResult[]; ignor
   return { rows, ignoredColumns };
 }
 
-// What WhatsApp puts in front of a copied or exported message: "[2:15 PM, 06/10/2026] Huzaifa: " (desktop) or
-// "06/10/2026, 2:15 pm - Huzaifa: " (exported chat).
+// What WhatsApp puts in front of a copied or exported message: "[2:15 PM, 06/10/2026] Huzaifa: " (desktop),
+// "06/10/2026, 2:15 pm - Huzaifa: " (Android export) or "[06/10/2026, 2:15:30 PM] Huzaifa: " (iPhone export).
 const CHAT_PREFIX = /^\s*(?:\[[^\]]{1,40}\]\s*|\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4},?\s+\d{1,2}:\d{2}(?:\s?[ap]\.?m\.?)?\s+-\s+)[^:|]{1,40}:\s*/i;
 
-// One product per line, the way an owner types it on WhatsApp: "K12 | 3500 | S2 M3 L1 | lawn, 3 piece". After the
-// sizes, anything else is a note (fabric, pieces, details) and helps the AI and meaning search. Lines without a "|"
-// (greetings, photos, "ok") are skipped, so a whole copied chat can be pasted into the file as it is.
+// The invisible direction marks (and BOM) WhatsApp puts around names, times and attachments.
+export const stripMarks = (text: string) => text.replace(/[‎‏‪-‮⁦-⁩﻿]/g, "");
+
+// One product the way an owner types it on WhatsApp: "K12 | 3500 | S2 M3 L1 | lawn, 3 piece". After the sizes,
+// anything else is a note (fabric, pieces, details) and helps the AI and meaning search. Null for a line without a
+// "|" (greetings, photos, "ok"); a chat prefix in front of it is ignored.
+export function parseProductLine(text: string, line: number, seen = new Map<string, number>()): SheetRowResult | null {
+  // An edited message ends with "<This message was edited>" (in the phone's language).
+  const cleaned = stripMarks(text)
+    .replace(CHAT_PREFIX, "")
+    .replace(/\s*<[^<>|]{1,60}>\s*$/, "")
+    .trim();
+  if (!cleaned.includes("|")) return null;
+  const [code = "", price = "", sizes = "", ...notes] = cleaned.split("|").map((part) => part.trim());
+  const cells: Partial<Record<SheetField, string>> = { sku: code, price_pkr: price, sizes, description: notes.filter(Boolean).join(", ") };
+  return parseRow(line, (field) => cells[field] ?? "", seen);
+}
+
+// A .txt of product lines, one per line; everything else is skipped, so copied chat messages can be pasted in.
 export function parseProductLines(text: string): { rows: SheetRowResult[] } {
   const seen = new Map<string, number>();
-  const rows: SheetRowResult[] = [];
-  text.split(/\r?\n/).forEach((raw, index) => {
-    const line = raw.replace(CHAT_PREFIX, "").trim();
-    if (!line.includes("|")) return;
-    const [code = "", price = "", sizes = "", ...notes] = line.split("|").map((part) => part.trim());
-    const cells: Partial<Record<SheetField, string>> = { sku: code, price_pkr: price, sizes, description: notes.filter(Boolean).join(", ") };
-    rows.push(parseRow(index + 1, (field) => cells[field] ?? "", seen));
-  });
-  return { rows };
+  return { rows: text.split(/\r?\n/).flatMap((raw, index) => parseProductLine(raw, index + 1, seen) ?? []) };
 }
 
 function parseRow(line: number, cell: (field: SheetField) => string, seen: Map<string, number>): SheetRowResult {

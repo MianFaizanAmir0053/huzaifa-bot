@@ -18,13 +18,13 @@ Agar maloom ho / if you know: kapra (lawn, cotton, khaddar, chiffon), 2 / 3 piec
 
 ## Kaise bhejein / How to send
 
-**WhatsApp (asaan / easiest):** product ki photos bhejein (pehli photo ke caption mein code), phir ek line:
+**WhatsApp (asaan / easiest):** ek product ki saari photos ek saath bhejein, aur pehli photo ke caption mein ye line likh dein / send one product's photos together, with this line as the first photo's caption:
 
 ```
 K12 | 3500 | S2 M3 L1 | lawn, 3 piece
 ```
 
-code | price | sizes | baaqi tafseel (other details), separated by `|`.
+code | price | sizes | baaqi tafseel (other details), separated by `|`. Phir agla product, apne alag message mein / then the next product, in its own message. Caption mein sirf code (`K12`) likh kar line alag message mein bhi bhej sakte hain / or put just the code in the caption and send the line as its own message. Pehle saari photos aur aakhir mein saari lines ek saath na bhejein / don't send all the photos first and all the lines at the end.
 
 **Google Sheet + Drive (zyada products / many products):** columns `code, price, sizes, name, category, colour, fabric, notes` (the first three required); photos named `K12-1.jpg`, `K12-2.jpg` or one folder per code (`K12`).
 
@@ -36,8 +36,8 @@ Wahi code, nayi ginti: `K12 | 3500 | S0 M1 L2`. Purana product update hota hai. 
 
 ## For the operator: turning it into products
 
-1. Put everything in `catalog/` at the repo root (git ignores it):
-   - WhatsApp: paste the client's lines (or the whole copied chat) into `catalog/products.txt`; save each product's photos into a folder named by its code (`catalog/K12/`), no renaming needed.
-   - Sheet: download it as CSV into `catalog/`, photos from Drive next to it.
-2. `pnpm import:products ./catalog --dry-run` — shows photos found per code, what the AI will fill, problems, and photos that matched no code.
+1. On the phone: the shop's chat → ⋮ → More → Export chat → **Include media**. Put the `.zip` in `catalog/` at the repo root (git ignores it); it's unpacked there on the next run. (A sheet: download it as CSV into `catalog/`, with the photos from Drive next to it.)
+2. `pnpm import:products ./catalog --dry-run` — lists each product with its photos (matched by the code in the caption, the photos sent with it, or the line next to them), what the AI will fill, and problems. Open `import-preview.html` (next to the chat) to check every product's photos by eye.
 3. `pnpm import:products ./catalog --publish` — creates or updates the products, fills name/category/colour/fabric/tags/description from the main photo, puts complete products live and adds them to search. The rest stay drafts with the reason in the output.
+
+Next batch: export the chat again and replace the `.zip`. Products already imported show as unchanged; the latest line per code wins, and a new stock line is applied less the orders confirmed after it was sent, so sold stock never comes back. Only the shop's messages count: your own questions and photos in that chat are skipped.

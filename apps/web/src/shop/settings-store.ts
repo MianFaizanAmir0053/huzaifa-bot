@@ -2,17 +2,26 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { DEFAULT_SHOP_SETTINGS, ShopSettingsSchema, parseShopSettings, type ShopSettings } from "./settings";
 
 // Stored as one private JSON file in Supabase Storage, so no database migration is needed.
-const BUCKET = "shop-config";
+export const CONFIG_BUCKET = "shop-config";
+const BUCKET = CONFIG_BUCKET;
 const OBJECT = "settings.json";
 const CACHE_MS = 60_000;
 
 let cache: { value: ShopSettings; at: number } | undefined;
 
-function isNotFound(error: unknown): boolean {
+export function isNotFound(error: unknown): boolean {
   const details = error as { message?: string; status?: number; statusCode?: string | number } | null;
   // Storage answers a missing file or bucket with HTTP 400, statusCode "404" and "Object/Bucket not found".
   // Any other 400 (bad key, bucket policy) is a real failure and must not look like "nothing saved yet".
   return String(details?.statusCode ?? "") === "404" || Number(details?.status) === 404 || /^(?:object|bucket) not found$/i.test(details?.message?.trim() ?? "");
+}
+
+// The private bucket for the shop's JSON files (settings, import records), made on first use.
+export async function ensureConfigBucket(client: SupabaseClient): Promise<void> {
+  const { data: bucket } = await client.storage.getBucket(BUCKET);
+  if (bucket) return;
+  const { error } = await client.storage.createBucket(BUCKET, { public: false, fileSizeLimit: 262_144, allowedMimeTypes: ["application/json"] });
+  if (error && !/already exists/i.test(error.message)) throw new Error(`Could not create settings storage: ${error.message}`);
 }
 
 // Only "nothing saved yet" means defaults. Any other failure throws (the admin page must not show an
@@ -43,11 +52,7 @@ export function scrubExampleChats(text: string): string {
 
 export async function saveShopSettings(client: SupabaseClient, settings: ShopSettings): Promise<void> {
   const valid = ShopSettingsSchema.parse({ ...settings, exampleChats: scrubExampleChats(settings.exampleChats) });
-  const { data: bucket } = await client.storage.getBucket(BUCKET);
-  if (!bucket) {
-    const { error } = await client.storage.createBucket(BUCKET, { public: false, fileSizeLimit: 262_144, allowedMimeTypes: ["application/json"] });
-    if (error && !/already exists/i.test(error.message)) throw new Error(`Could not create settings storage: ${error.message}`);
-  }
+  await ensureConfigBucket(client);
   const { error } = await client.storage
     .from(BUCKET)
     .upload(OBJECT, new Blob([JSON.stringify(valid, null, 2)], { type: "application/json" }), { upsert: true, contentType: "application/json", cacheControl: "0" });

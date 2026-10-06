@@ -34,26 +34,24 @@ pnpm --filter @huzaifa/gateway dev          # http://localhost:3001, QR at /admi
 
 ## Adding many products at once
 
-The shop sends photos plus one line per product: a **code**, the **price** and the **sizes with how many of each**. Everything else (name, category, colour, fabric, tags, description) is read from the main photo by Gemini, unless the sheet already says it.
+The shop sends each product on WhatsApp: its photos, with one line as the first photo's caption, `K12 | 3500 | S2 M3 L1 | lawn, 3 piece` (**code** | **price** | **sizes with how many of each** | anything else). Everything else (name, category, colour, fabric, tags, description) is read from the main photo by Gemini, unless the line already says it. A short guide to send the shop owner is in `docs/catalog/client-guide.md`.
 
-1. Make a folder `catalog/` in the repo root (git ignores it) with:
-   - either the sheet as CSV (start from `docs/catalog/products-template.csv`; Excel/Google Sheets → Download → CSV), with columns `code, price, sizes` and optionally `name, category, colour, fabric, notes`;
-   - or `products.txt` with one WhatsApp-style line per product, `K12 | 3500 | S2 M3 L1 | lawn, 3 piece` (a whole copied WhatsApp chat works: other lines are skipped);
-   - the photos, named by code (`K12-1.jpg`, `K12-2.jpg`, the `-1` photo is the main one) or in a folder per code (`K12/…`).
+1. On the phone (an up-to-date WhatsApp, with the photos downloaded), open the shop's chat → ⋮ → More → Export chat → **Include media**, and get the `.zip` onto this computer. Android and iPhone exports both work.
+2. Put the `.zip` in a folder `catalog/` in the repo root (git ignores it); it's unpacked there. Photos go to the code in their caption, along with the photos sent with them, or to the line sent next to them. Only the shop's messages count (whoever sends the product lines): your own questions, forwards and photos in that chat are skipped.
 
-   Sizes are written like `S2 M3 L1`, `Free 5` or `32-2 34-1`.
-2. Check it without changing anything:
+   Instead of a chat, `catalog/` can hold a sheet as CSV (start from `docs/catalog/products-template.csv`; columns `code, price, sizes`, optionally `name, category, colour, fabric, notes`) or a `products.txt` with one line per product, with the photos named by code (`K12-1.jpg`, `K12-2.jpg`; the `-1` one is the main photo) or in a folder per code (`K12/…`). Sizes are written like `S2 M3 L1`, `Free 5` or `32-2 34-1`.
+3. Check it without changing anything:
    ```powershell
    pnpm import:products ./catalog --dry-run
    ```
-   It lists the photos found per product, what the AI will fill, rows with problems, and photos that match no code.
-3. Import and put complete products live:
+   It lists each product with its photos, what the AI will fill and any problems, and writes `import-preview.html` next to the chat or sheet: open it to see every product with its photos, and the photos nothing used.
+4. Import and put complete products live:
    ```powershell
    pnpm import:products ./catalog --publish
    ```
-   Products missing something stay drafts and the report says what. Re-running is safe: products match by code, photos aren't uploaded twice, sizes are updated (handy for stock updates). Live products are added to meaning and photo search straight away.
+   Products missing something stay drafts and the report says what. Live products are added to meaning and photo search straight away.
 
-A short guide to send the shop owner is in `docs/catalog/client-guide.md`.
+Re-running is safe, so the next batch is just a new export of the same chat. Products match by code (`K 12` is `K12`), and a record of each import (one small JSON per code in the private `shop-config` bucket) means a photo is uploaded once: one you remove in the admin stays removed, and a run that stopped halfway finishes the rest. From a chat, the latest line per code wins (a stock update is the same code with new counts), and a product already in the shop only takes a line it hasn't had before, with the stock less what orders took after that line was sent (the shop counted before those sales). For a product made in the admin, only a line sent after its last edit counts.
 
 ## How a reply is made
 
